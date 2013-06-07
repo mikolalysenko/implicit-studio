@@ -1,0 +1,24 @@
+{
+  "name": "implicit-studio",
+  "version": "0.0.0",
+  "description": "Basic in browser tool for plotting implicit funcitons",
+  "main": "index.js",
+  "dependencies": {
+    "isosurface": "~0.1.0",
+    "gl-shells": "~0.1.2",
+    "normals": "~0.1.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": "",
+  "keywords": [
+    "implicit",
+    "voxel",
+    "3d"
+  ],
+  "author": "Mikola Lysenko",
+  "license": "MIT",
+  "readmeFilename": "README.md"
+}
