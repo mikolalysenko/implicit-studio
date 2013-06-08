@@ -8,7 +8,9 @@
     "gl-shells": "~0.1.2",
     "normals": "~0.1.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "spatial-noise": "0.0.1"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
