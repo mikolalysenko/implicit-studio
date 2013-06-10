@@ -8,6 +8,479 @@ if(typeof window !== "undefined") {
   require("./lib/mesh-worker.js")
 }
 },{"./lib/ui.js":2,"./lib/mesh-worker.js":3}],4:[function(require,module,exports){
+// TODO actually recognize syntax of TypeScript constructs
+
+CodeMirror.defineMode("javascript", function(config, parserConfig) {
+  var indentUnit = config.indentUnit;
+  var jsonMode = parserConfig.json;
+  var isTS = parserConfig.typescript;
+
+  // Tokenizer
+
+  var keywords = function(){
+    function kw(type) {return {type: type, style: "keyword"};}
+    var A = kw("keyword a"), B = kw("keyword b"), C = kw("keyword c");
+    var operator = kw("operator"), atom = {type: "atom", style: "atom"};
+
+    var jsKeywords = {
+      "if": kw("if"), "while": A, "with": A, "else": B, "do": B, "try": B, "finally": B,
+      "return": C, "break": C, "continue": C, "new": C, "delete": C, "throw": C,
+      "var": kw("var"), "const": kw("var"), "let": kw("var"),
+      "function": kw("function"), "catch": kw("catch"),
+      "for": kw("for"), "switch": kw("switch"), "case": kw("case"), "default": kw("default"),
+      "in": operator, "typeof": operator, "instanceof": operator,
+      "true": atom, "false": atom, "null": atom, "undefined": atom, "NaN": atom, "Infinity": atom,
+      "this": kw("this")
+    };
+
+    // Extend the 'normal' keywords with the TypeScript language extensions
+    if (isTS) {
+      var type = {type: "variable", style: "variable-3"};
+      var tsKeywords = {
+        // object-like things
+        "interface": kw("interface"),
+        "class": kw("class"),
+        "extends": kw("extends"),
+        "constructor": kw("constructor"),
+
+        // scope modifiers
+        "public": kw("public"),
+        "private": kw("private"),
+        "protected": kw("protected"),
+        "static": kw("static"),
+
+        "super": kw("super"),
+
+        // types
+        "string": type, "number": type, "bool": type, "any": type
+      };
+
+      for (var attr in tsKeywords) {
+        jsKeywords[attr] = tsKeywords[attr];
+      }
+    }
+
+    return jsKeywords;
+  }();
+
+  var isOperatorChar = /[+\-*&%=<>!?|~^]/;
+
+  function chain(stream, state, f) {
+    state.tokenize = f;
+    return f(stream, state);
+  }
+
+  function nextUntilUnescaped(stream, end) {
+    var escaped = false, next;
+    while ((next = stream.next()) != null) {
+      if (next == end && !escaped)
+        return false;
+      escaped = !escaped && next == "\\";
+    }
+    return escaped;
+  }
+
+  // Used as scratch variables to communicate multiple values without
+  // consing up tons of objects.
+  var type, content;
+  function ret(tp, style, cont) {
+    type = tp; content = cont;
+    return style;
+  }
+
+  function jsTokenBase(stream, state) {
+    var ch = stream.next();
+    if (ch == '"' || ch == "'")
+      return chain(stream, state, jsTokenString(ch));
+    else if (/[\[\]{}\(\),;\:\.]/.test(ch))
+      return ret(ch);
+    else if (ch == "0" && stream.eat(/x/i)) {
+      stream.eatWhile(/[\da-f]/i);
+      return ret("number", "number");
+    }
+    else if (/\d/.test(ch) || ch == "-" && stream.eat(/\d/)) {
+      stream.match(/^\d*(?:\.\d*)?(?:[eE][+\-]?\d+)?/);
+      return ret("number", "number");
+    }
+    else if (ch == "/") {
+      if (stream.eat("*")) {
+        return chain(stream, state, jsTokenComment);
+      }
+      else if (stream.eat("/")) {
+        stream.skipToEnd();
+        return ret("comment", "comment");
+      }
+      else if (state.lastType == "operator" || state.lastType == "keyword c" ||
+               /^[\[{}\(,;:]$/.test(state.lastType)) {
+        nextUntilUnescaped(stream, "/");
+        stream.eatWhile(/[gimy]/); // 'y' is "sticky" option in Mozilla
+        return ret("regexp", "string-2");
+      }
+      else {
+        stream.eatWhile(isOperatorChar);
+        return ret("operator", null, stream.current());
+      }
+    }
+    else if (ch == "#") {
+      stream.skipToEnd();
+      return ret("error", "error");
+    }
+    else if (isOperatorChar.test(ch)) {
+      stream.eatWhile(isOperatorChar);
+      return ret("operator", null, stream.current());
+    }
+    else {
+      stream.eatWhile(/[\w\$_]/);
+      var word = stream.current(), known = keywords.propertyIsEnumerable(word) && keywords[word];
+      return (known && state.lastType != ".") ? ret(known.type, known.style, word) :
+                     ret("variable", "variable", word);
+    }
+  }
+
+  function jsTokenString(quote) {
+    return function(stream, state) {
+      if (!nextUntilUnescaped(stream, quote))
+        state.tokenize = jsTokenBase;
+      return ret("string", "string");
+    };
+  }
+
+  function jsTokenComment(stream, state) {
+    var maybeEnd = false, ch;
+    while (ch = stream.next()) {
+      if (ch == "/" && maybeEnd) {
+        state.tokenize = jsTokenBase;
+        break;
+      }
+      maybeEnd = (ch == "*");
+    }
+    return ret("comment", "comment");
+  }
+
+  // Parser
+
+  var atomicTypes = {"atom": true, "number": true, "variable": true, "string": true, "regexp": true, "this": true};
+
+  function JSLexical(indented, column, type, align, prev, info) {
+    this.indented = indented;
+    this.column = column;
+    this.type = type;
+    this.prev = prev;
+    this.info = info;
+    if (align != null) this.align = align;
+  }
+
+  function inScope(state, varname) {
+    for (var v = state.localVars; v; v = v.next)
+      if (v.name == varname) return true;
+  }
+
+  function parseJS(state, style, type, content, stream) {
+    var cc = state.cc;
+    // Communicate our context to the combinators.
+    // (Less wasteful than consing up a hundred closures on every call.)
+    cx.state = state; cx.stream = stream; cx.marked = null, cx.cc = cc;
+
+    if (!state.lexical.hasOwnProperty("align"))
+      state.lexical.align = true;
+
+    while(true) {
+      var combinator = cc.length ? cc.pop() : jsonMode ? expression : statement;
+      if (combinator(type, content)) {
+        while(cc.length && cc[cc.length - 1].lex)
+          cc.pop()();
+        if (cx.marked) return cx.marked;
+        if (type == "variable" && inScope(state, content)) return "variable-2";
+        return style;
+      }
+    }
+  }
+
+  // Combinator utils
+
+  var cx = {state: null, column: null, marked: null, cc: null};
+  function pass() {
+    for (var i = arguments.length - 1; i >= 0; i--) cx.cc.push(arguments[i]);
+  }
+  function cont() {
+    pass.apply(null, arguments);
+    return true;
+  }
+  function register(varname) {
+    function inList(list) {
+      for (var v = list; v; v = v.next)
+        if (v.name == varname) return true;
+      return false;
+    }
+    var state = cx.state;
+    if (state.context) {
+      cx.marked = "def";
+      if (inList(state.localVars)) return;
+      state.localVars = {name: varname, next: state.localVars};
+    } else {
+      if (inList(state.globalVars)) return;
+      state.globalVars = {name: varname, next: state.globalVars};
+    }
+  }
+
+  // Combinators
+
+  var defaultVars = {name: "this", next: {name: "arguments"}};
+  function pushcontext() {
+    cx.state.context = {prev: cx.state.context, vars: cx.state.localVars};
+    cx.state.localVars = defaultVars;
+  }
+  function popcontext() {
+    cx.state.localVars = cx.state.context.vars;
+    cx.state.context = cx.state.context.prev;
+  }
+  function pushlex(type, info) {
+    var result = function() {
+      var state = cx.state;
+      state.lexical = new JSLexical(state.indented, cx.stream.column(), type, null, state.lexical, info);
+    };
+    result.lex = true;
+    return result;
+  }
+  function poplex() {
+    var state = cx.state;
+    if (state.lexical.prev) {
+      if (state.lexical.type == ")")
+        state.indented = state.lexical.indented;
+      state.lexical = state.lexical.prev;
+    }
+  }
+  poplex.lex = true;
+
+  function expect(wanted) {
+    return function(type) {
+      if (type == wanted) return cont();
+      else if (wanted == ";") return pass();
+      else return cont(arguments.callee);
+    };
+  }
+
+  function statement(type) {
+    if (type == "var") return cont(pushlex("vardef"), vardef1, expect(";"), poplex);
+    if (type == "keyword a") return cont(pushlex("form"), expression, statement, poplex);
+    if (type == "keyword b") return cont(pushlex("form"), statement, poplex);
+    if (type == "{") return cont(pushlex("}"), block, poplex);
+    if (type == ";") return cont();
+    if (type == "if") return cont(pushlex("form"), expression, statement, poplex, maybeelse(cx.state.indented));
+    if (type == "function") return cont(functiondef);
+    if (type == "for") return cont(pushlex("form"), expect("("), pushlex(")"), forspec1, expect(")"),
+                                      poplex, statement, poplex);
+    if (type == "variable") return cont(pushlex("stat"), maybelabel);
+    if (type == "switch") return cont(pushlex("form"), expression, pushlex("}", "switch"), expect("{"),
+                                         block, poplex, poplex);
+    if (type == "case") return cont(expression, expect(":"));
+    if (type == "default") return cont(expect(":"));
+    if (type == "catch") return cont(pushlex("form"), pushcontext, expect("("), funarg, expect(")"),
+                                        statement, poplex, popcontext);
+    return pass(pushlex("stat"), expression, expect(";"), poplex);
+  }
+  function expression(type) {
+    return expressionInner(type, maybeoperatorComma);
+  }
+  function expressionNoComma(type) {
+    return expressionInner(type, maybeoperatorNoComma);
+  }
+  function expressionInner(type, maybeop) {
+    if (atomicTypes.hasOwnProperty(type)) return cont(maybeop);
+    if (type == "function") return cont(functiondef);
+    if (type == "keyword c") return cont(maybeexpression);
+    if (type == "(") return cont(pushlex(")"), maybeexpression, expect(")"), poplex, maybeop);
+    if (type == "operator") return cont(expression);
+    if (type == "[") return cont(pushlex("]"), commasep(expressionNoComma, "]"), poplex, maybeop);
+    if (type == "{") return cont(pushlex("}"), commasep(objprop, "}"), poplex, maybeop);
+    return cont();
+  }
+  function maybeexpression(type) {
+    if (type.match(/[;\}\)\],]/)) return pass();
+    return pass(expression);
+  }
+
+  function maybeoperatorComma(type, value) {
+    if (type == ",") return pass();
+    return maybeoperatorNoComma(type, value, maybeoperatorComma);
+  }
+  function maybeoperatorNoComma(type, value, me) {
+    if (!me) me = maybeoperatorNoComma;
+    if (type == "operator") {
+      if (/\+\+|--/.test(value)) return cont(me);
+      if (value == "?") return cont(expression, expect(":"), expression);
+      return cont(expression);
+    }
+    if (type == ";") return;
+    if (type == "(") return cont(pushlex(")", "call"), commasep(expressionNoComma, ")"), poplex, me);
+    if (type == ".") return cont(property, me);
+    if (type == "[") return cont(pushlex("]"), expression, expect("]"), poplex, me);
+  }
+  function maybelabel(type) {
+    if (type == ":") return cont(poplex, statement);
+    return pass(maybeoperatorComma, expect(";"), poplex);
+  }
+  function property(type) {
+    if (type == "variable") {cx.marked = "property"; return cont();}
+  }
+  function objprop(type, value) {
+    if (type == "variable") {
+      cx.marked = "property";
+      if (value == "get" || value == "set") return cont(getterSetter);
+    } else if (type == "number" || type == "string") {
+      cx.marked = type + " property";
+    }
+    if (atomicTypes.hasOwnProperty(type)) return cont(expect(":"), expressionNoComma);
+  }
+  function getterSetter(type) {
+    if (type == ":") return cont(expression);
+    if (type != "variable") return cont(expect(":"), expression);
+    cx.marked = "property";
+    return cont(functiondef);
+  }
+  function commasep(what, end) {
+    function proceed(type) {
+      if (type == ",") {
+        var lex = cx.state.lexical;
+        if (lex.info == "call") lex.pos = (lex.pos || 0) + 1;
+        return cont(what, proceed);
+      }
+      if (type == end) return cont();
+      return cont(expect(end));
+    }
+    return function(type) {
+      if (type == end) return cont();
+      else return pass(what, proceed);
+    };
+  }
+  function block(type) {
+    if (type == "}") return cont();
+    return pass(statement, block);
+  }
+  function maybetype(type) {
+    if (type == ":") return cont(typedef);
+    return pass();
+  }
+  function typedef(type) {
+    if (type == "variable"){cx.marked = "variable-3"; return cont();}
+    return pass();
+  }
+  function vardef1(type, value) {
+    if (type == "variable") {
+      register(value);
+      return isTS ? cont(maybetype, vardef2) : cont(vardef2);
+    }
+    return pass();
+  }
+  function vardef2(type, value) {
+    if (value == "=") return cont(expressionNoComma, vardef2);
+    if (type == ",") return cont(vardef1);
+  }
+  function maybeelse(indent) {
+    return function(type, value) {
+      if (type == "keyword b" && value == "else") {
+        cx.state.lexical = new JSLexical(indent, 0, "form", null, cx.state.lexical);
+        return cont(statement, poplex);
+      }
+      return pass();
+    };
+  }
+  function forspec1(type) {
+    if (type == "var") return cont(vardef1, expect(";"), forspec2);
+    if (type == ";") return cont(forspec2);
+    if (type == "variable") return cont(formaybein);
+    return pass(expression, expect(";"), forspec2);
+  }
+  function formaybein(_type, value) {
+    if (value == "in") return cont(expression);
+    return cont(maybeoperatorComma, forspec2);
+  }
+  function forspec2(type, value) {
+    if (type == ";") return cont(forspec3);
+    if (value == "in") return cont(expression);
+    return pass(expression, expect(";"), forspec3);
+  }
+  function forspec3(type) {
+    if (type != ")") cont(expression);
+  }
+  function functiondef(type, value) {
+    if (type == "variable") {register(value); return cont(functiondef);}
+    if (type == "(") return cont(pushlex(")"), pushcontext, commasep(funarg, ")"), poplex, statement, popcontext);
+  }
+  function funarg(type, value) {
+    if (type == "variable") {register(value); return isTS ? cont(maybetype) : cont();}
+  }
+
+  // Interface
+
+  return {
+    startState: function(basecolumn) {
+      return {
+        tokenize: jsTokenBase,
+        lastType: null,
+        cc: [],
+        lexical: new JSLexical((basecolumn || 0) - indentUnit, 0, "block", false),
+        localVars: parserConfig.localVars,
+        globalVars: parserConfig.globalVars,
+        context: parserConfig.localVars && {vars: parserConfig.localVars},
+        indented: 0
+      };
+    },
+
+    token: function(stream, state) {
+      if (stream.sol()) {
+        if (!state.lexical.hasOwnProperty("align"))
+          state.lexical.align = false;
+        state.indented = stream.indentation();
+      }
+      if (state.tokenize != jsTokenComment && stream.eatSpace()) return null;
+      var style = state.tokenize(stream, state);
+      if (type == "comment") return style;
+      state.lastType = type == "operator" && (content == "++" || content == "--") ? "incdec" : type;
+      return parseJS(state, style, type, content, stream);
+    },
+
+    indent: function(state, textAfter) {
+      if (state.tokenize == jsTokenComment) return CodeMirror.Pass;
+      if (state.tokenize != jsTokenBase) return 0;
+      var firstChar = textAfter && textAfter.charAt(0), lexical = state.lexical;
+      if (lexical.type == "stat" && firstChar == "}") lexical = lexical.prev;
+      var type = lexical.type, closing = firstChar == type;
+      if (parserConfig.statementIndent != null) {
+        if (type == ")" && lexical.prev && lexical.prev.type == "stat") lexical = lexical.prev;
+        if (lexical.type == "stat") return lexical.indented + parserConfig.statementIndent;
+      }
+
+      if (type == "vardef") return lexical.indented + (state.lastType == "operator" || state.lastType == "," ? 4 : 0);
+      else if (type == "form" && firstChar == "{") return lexical.indented;
+      else if (type == "form") return lexical.indented + indentUnit;
+      else if (type == "stat")
+        return lexical.indented + (state.lastType == "operator" || state.lastType == "," ? indentUnit : 0);
+      else if (lexical.info == "switch" && !closing)
+        return lexical.indented + (/^(?:case|default)\b/.test(textAfter) ? indentUnit : 2 * indentUnit);
+      else if (lexical.align) return lexical.column + (closing ? 0 : 1);
+      else return lexical.indented + (closing ? 0 : indentUnit);
+    },
+
+    electricChars: ":{}",
+    blockCommentStart: jsonMode ? null : "/*",
+    blockCommentEnd: jsonMode ? null : "*/",
+    lineComment: jsonMode ? null : "//",
+
+    jsonMode: jsonMode
+  };
+});
+
+CodeMirror.defineMIME("text/javascript", "javascript");
+CodeMirror.defineMIME("text/ecmascript", "javascript");
+CodeMirror.defineMIME("application/javascript", "javascript");
+CodeMirror.defineMIME("application/ecmascript", "javascript");
+CodeMirror.defineMIME("application/json", {name: "javascript", json: true});
+CodeMirror.defineMIME("application/x-json", {name: "javascript", json: true});
+CodeMirror.defineMIME("text/typescript", { name: "javascript", typescript: true });
+CodeMirror.defineMIME("application/typescript", { name: "javascript", typescript: true });
+
+},{}],5:[function(require,module,exports){
 (function(){// CodeMirror version 3.13
 //
 // CodeMirror is the only global var we claim
@@ -5647,479 +6120,6 @@ window.CodeMirror = (function() {
 })();
 
 })()
-},{}],5:[function(require,module,exports){
-// TODO actually recognize syntax of TypeScript constructs
-
-CodeMirror.defineMode("javascript", function(config, parserConfig) {
-  var indentUnit = config.indentUnit;
-  var jsonMode = parserConfig.json;
-  var isTS = parserConfig.typescript;
-
-  // Tokenizer
-
-  var keywords = function(){
-    function kw(type) {return {type: type, style: "keyword"};}
-    var A = kw("keyword a"), B = kw("keyword b"), C = kw("keyword c");
-    var operator = kw("operator"), atom = {type: "atom", style: "atom"};
-
-    var jsKeywords = {
-      "if": kw("if"), "while": A, "with": A, "else": B, "do": B, "try": B, "finally": B,
-      "return": C, "break": C, "continue": C, "new": C, "delete": C, "throw": C,
-      "var": kw("var"), "const": kw("var"), "let": kw("var"),
-      "function": kw("function"), "catch": kw("catch"),
-      "for": kw("for"), "switch": kw("switch"), "case": kw("case"), "default": kw("default"),
-      "in": operator, "typeof": operator, "instanceof": operator,
-      "true": atom, "false": atom, "null": atom, "undefined": atom, "NaN": atom, "Infinity": atom,
-      "this": kw("this")
-    };
-
-    // Extend the 'normal' keywords with the TypeScript language extensions
-    if (isTS) {
-      var type = {type: "variable", style: "variable-3"};
-      var tsKeywords = {
-        // object-like things
-        "interface": kw("interface"),
-        "class": kw("class"),
-        "extends": kw("extends"),
-        "constructor": kw("constructor"),
-
-        // scope modifiers
-        "public": kw("public"),
-        "private": kw("private"),
-        "protected": kw("protected"),
-        "static": kw("static"),
-
-        "super": kw("super"),
-
-        // types
-        "string": type, "number": type, "bool": type, "any": type
-      };
-
-      for (var attr in tsKeywords) {
-        jsKeywords[attr] = tsKeywords[attr];
-      }
-    }
-
-    return jsKeywords;
-  }();
-
-  var isOperatorChar = /[+\-*&%=<>!?|~^]/;
-
-  function chain(stream, state, f) {
-    state.tokenize = f;
-    return f(stream, state);
-  }
-
-  function nextUntilUnescaped(stream, end) {
-    var escaped = false, next;
-    while ((next = stream.next()) != null) {
-      if (next == end && !escaped)
-        return false;
-      escaped = !escaped && next == "\\";
-    }
-    return escaped;
-  }
-
-  // Used as scratch variables to communicate multiple values without
-  // consing up tons of objects.
-  var type, content;
-  function ret(tp, style, cont) {
-    type = tp; content = cont;
-    return style;
-  }
-
-  function jsTokenBase(stream, state) {
-    var ch = stream.next();
-    if (ch == '"' || ch == "'")
-      return chain(stream, state, jsTokenString(ch));
-    else if (/[\[\]{}\(\),;\:\.]/.test(ch))
-      return ret(ch);
-    else if (ch == "0" && stream.eat(/x/i)) {
-      stream.eatWhile(/[\da-f]/i);
-      return ret("number", "number");
-    }
-    else if (/\d/.test(ch) || ch == "-" && stream.eat(/\d/)) {
-      stream.match(/^\d*(?:\.\d*)?(?:[eE][+\-]?\d+)?/);
-      return ret("number", "number");
-    }
-    else if (ch == "/") {
-      if (stream.eat("*")) {
-        return chain(stream, state, jsTokenComment);
-      }
-      else if (stream.eat("/")) {
-        stream.skipToEnd();
-        return ret("comment", "comment");
-      }
-      else if (state.lastType == "operator" || state.lastType == "keyword c" ||
-               /^[\[{}\(,;:]$/.test(state.lastType)) {
-        nextUntilUnescaped(stream, "/");
-        stream.eatWhile(/[gimy]/); // 'y' is "sticky" option in Mozilla
-        return ret("regexp", "string-2");
-      }
-      else {
-        stream.eatWhile(isOperatorChar);
-        return ret("operator", null, stream.current());
-      }
-    }
-    else if (ch == "#") {
-      stream.skipToEnd();
-      return ret("error", "error");
-    }
-    else if (isOperatorChar.test(ch)) {
-      stream.eatWhile(isOperatorChar);
-      return ret("operator", null, stream.current());
-    }
-    else {
-      stream.eatWhile(/[\w\$_]/);
-      var word = stream.current(), known = keywords.propertyIsEnumerable(word) && keywords[word];
-      return (known && state.lastType != ".") ? ret(known.type, known.style, word) :
-                     ret("variable", "variable", word);
-    }
-  }
-
-  function jsTokenString(quote) {
-    return function(stream, state) {
-      if (!nextUntilUnescaped(stream, quote))
-        state.tokenize = jsTokenBase;
-      return ret("string", "string");
-    };
-  }
-
-  function jsTokenComment(stream, state) {
-    var maybeEnd = false, ch;
-    while (ch = stream.next()) {
-      if (ch == "/" && maybeEnd) {
-        state.tokenize = jsTokenBase;
-        break;
-      }
-      maybeEnd = (ch == "*");
-    }
-    return ret("comment", "comment");
-  }
-
-  // Parser
-
-  var atomicTypes = {"atom": true, "number": true, "variable": true, "string": true, "regexp": true, "this": true};
-
-  function JSLexical(indented, column, type, align, prev, info) {
-    this.indented = indented;
-    this.column = column;
-    this.type = type;
-    this.prev = prev;
-    this.info = info;
-    if (align != null) this.align = align;
-  }
-
-  function inScope(state, varname) {
-    for (var v = state.localVars; v; v = v.next)
-      if (v.name == varname) return true;
-  }
-
-  function parseJS(state, style, type, content, stream) {
-    var cc = state.cc;
-    // Communicate our context to the combinators.
-    // (Less wasteful than consing up a hundred closures on every call.)
-    cx.state = state; cx.stream = stream; cx.marked = null, cx.cc = cc;
-
-    if (!state.lexical.hasOwnProperty("align"))
-      state.lexical.align = true;
-
-    while(true) {
-      var combinator = cc.length ? cc.pop() : jsonMode ? expression : statement;
-      if (combinator(type, content)) {
-        while(cc.length && cc[cc.length - 1].lex)
-          cc.pop()();
-        if (cx.marked) return cx.marked;
-        if (type == "variable" && inScope(state, content)) return "variable-2";
-        return style;
-      }
-    }
-  }
-
-  // Combinator utils
-
-  var cx = {state: null, column: null, marked: null, cc: null};
-  function pass() {
-    for (var i = arguments.length - 1; i >= 0; i--) cx.cc.push(arguments[i]);
-  }
-  function cont() {
-    pass.apply(null, arguments);
-    return true;
-  }
-  function register(varname) {
-    function inList(list) {
-      for (var v = list; v; v = v.next)
-        if (v.name == varname) return true;
-      return false;
-    }
-    var state = cx.state;
-    if (state.context) {
-      cx.marked = "def";
-      if (inList(state.localVars)) return;
-      state.localVars = {name: varname, next: state.localVars};
-    } else {
-      if (inList(state.globalVars)) return;
-      state.globalVars = {name: varname, next: state.globalVars};
-    }
-  }
-
-  // Combinators
-
-  var defaultVars = {name: "this", next: {name: "arguments"}};
-  function pushcontext() {
-    cx.state.context = {prev: cx.state.context, vars: cx.state.localVars};
-    cx.state.localVars = defaultVars;
-  }
-  function popcontext() {
-    cx.state.localVars = cx.state.context.vars;
-    cx.state.context = cx.state.context.prev;
-  }
-  function pushlex(type, info) {
-    var result = function() {
-      var state = cx.state;
-      state.lexical = new JSLexical(state.indented, cx.stream.column(), type, null, state.lexical, info);
-    };
-    result.lex = true;
-    return result;
-  }
-  function poplex() {
-    var state = cx.state;
-    if (state.lexical.prev) {
-      if (state.lexical.type == ")")
-        state.indented = state.lexical.indented;
-      state.lexical = state.lexical.prev;
-    }
-  }
-  poplex.lex = true;
-
-  function expect(wanted) {
-    return function(type) {
-      if (type == wanted) return cont();
-      else if (wanted == ";") return pass();
-      else return cont(arguments.callee);
-    };
-  }
-
-  function statement(type) {
-    if (type == "var") return cont(pushlex("vardef"), vardef1, expect(";"), poplex);
-    if (type == "keyword a") return cont(pushlex("form"), expression, statement, poplex);
-    if (type == "keyword b") return cont(pushlex("form"), statement, poplex);
-    if (type == "{") return cont(pushlex("}"), block, poplex);
-    if (type == ";") return cont();
-    if (type == "if") return cont(pushlex("form"), expression, statement, poplex, maybeelse(cx.state.indented));
-    if (type == "function") return cont(functiondef);
-    if (type == "for") return cont(pushlex("form"), expect("("), pushlex(")"), forspec1, expect(")"),
-                                      poplex, statement, poplex);
-    if (type == "variable") return cont(pushlex("stat"), maybelabel);
-    if (type == "switch") return cont(pushlex("form"), expression, pushlex("}", "switch"), expect("{"),
-                                         block, poplex, poplex);
-    if (type == "case") return cont(expression, expect(":"));
-    if (type == "default") return cont(expect(":"));
-    if (type == "catch") return cont(pushlex("form"), pushcontext, expect("("), funarg, expect(")"),
-                                        statement, poplex, popcontext);
-    return pass(pushlex("stat"), expression, expect(";"), poplex);
-  }
-  function expression(type) {
-    return expressionInner(type, maybeoperatorComma);
-  }
-  function expressionNoComma(type) {
-    return expressionInner(type, maybeoperatorNoComma);
-  }
-  function expressionInner(type, maybeop) {
-    if (atomicTypes.hasOwnProperty(type)) return cont(maybeop);
-    if (type == "function") return cont(functiondef);
-    if (type == "keyword c") return cont(maybeexpression);
-    if (type == "(") return cont(pushlex(")"), maybeexpression, expect(")"), poplex, maybeop);
-    if (type == "operator") return cont(expression);
-    if (type == "[") return cont(pushlex("]"), commasep(expressionNoComma, "]"), poplex, maybeop);
-    if (type == "{") return cont(pushlex("}"), commasep(objprop, "}"), poplex, maybeop);
-    return cont();
-  }
-  function maybeexpression(type) {
-    if (type.match(/[;\}\)\],]/)) return pass();
-    return pass(expression);
-  }
-
-  function maybeoperatorComma(type, value) {
-    if (type == ",") return pass();
-    return maybeoperatorNoComma(type, value, maybeoperatorComma);
-  }
-  function maybeoperatorNoComma(type, value, me) {
-    if (!me) me = maybeoperatorNoComma;
-    if (type == "operator") {
-      if (/\+\+|--/.test(value)) return cont(me);
-      if (value == "?") return cont(expression, expect(":"), expression);
-      return cont(expression);
-    }
-    if (type == ";") return;
-    if (type == "(") return cont(pushlex(")", "call"), commasep(expressionNoComma, ")"), poplex, me);
-    if (type == ".") return cont(property, me);
-    if (type == "[") return cont(pushlex("]"), expression, expect("]"), poplex, me);
-  }
-  function maybelabel(type) {
-    if (type == ":") return cont(poplex, statement);
-    return pass(maybeoperatorComma, expect(";"), poplex);
-  }
-  function property(type) {
-    if (type == "variable") {cx.marked = "property"; return cont();}
-  }
-  function objprop(type, value) {
-    if (type == "variable") {
-      cx.marked = "property";
-      if (value == "get" || value == "set") return cont(getterSetter);
-    } else if (type == "number" || type == "string") {
-      cx.marked = type + " property";
-    }
-    if (atomicTypes.hasOwnProperty(type)) return cont(expect(":"), expressionNoComma);
-  }
-  function getterSetter(type) {
-    if (type == ":") return cont(expression);
-    if (type != "variable") return cont(expect(":"), expression);
-    cx.marked = "property";
-    return cont(functiondef);
-  }
-  function commasep(what, end) {
-    function proceed(type) {
-      if (type == ",") {
-        var lex = cx.state.lexical;
-        if (lex.info == "call") lex.pos = (lex.pos || 0) + 1;
-        return cont(what, proceed);
-      }
-      if (type == end) return cont();
-      return cont(expect(end));
-    }
-    return function(type) {
-      if (type == end) return cont();
-      else return pass(what, proceed);
-    };
-  }
-  function block(type) {
-    if (type == "}") return cont();
-    return pass(statement, block);
-  }
-  function maybetype(type) {
-    if (type == ":") return cont(typedef);
-    return pass();
-  }
-  function typedef(type) {
-    if (type == "variable"){cx.marked = "variable-3"; return cont();}
-    return pass();
-  }
-  function vardef1(type, value) {
-    if (type == "variable") {
-      register(value);
-      return isTS ? cont(maybetype, vardef2) : cont(vardef2);
-    }
-    return pass();
-  }
-  function vardef2(type, value) {
-    if (value == "=") return cont(expressionNoComma, vardef2);
-    if (type == ",") return cont(vardef1);
-  }
-  function maybeelse(indent) {
-    return function(type, value) {
-      if (type == "keyword b" && value == "else") {
-        cx.state.lexical = new JSLexical(indent, 0, "form", null, cx.state.lexical);
-        return cont(statement, poplex);
-      }
-      return pass();
-    };
-  }
-  function forspec1(type) {
-    if (type == "var") return cont(vardef1, expect(";"), forspec2);
-    if (type == ";") return cont(forspec2);
-    if (type == "variable") return cont(formaybein);
-    return pass(expression, expect(";"), forspec2);
-  }
-  function formaybein(_type, value) {
-    if (value == "in") return cont(expression);
-    return cont(maybeoperatorComma, forspec2);
-  }
-  function forspec2(type, value) {
-    if (type == ";") return cont(forspec3);
-    if (value == "in") return cont(expression);
-    return pass(expression, expect(";"), forspec3);
-  }
-  function forspec3(type) {
-    if (type != ")") cont(expression);
-  }
-  function functiondef(type, value) {
-    if (type == "variable") {register(value); return cont(functiondef);}
-    if (type == "(") return cont(pushlex(")"), pushcontext, commasep(funarg, ")"), poplex, statement, popcontext);
-  }
-  function funarg(type, value) {
-    if (type == "variable") {register(value); return isTS ? cont(maybetype) : cont();}
-  }
-
-  // Interface
-
-  return {
-    startState: function(basecolumn) {
-      return {
-        tokenize: jsTokenBase,
-        lastType: null,
-        cc: [],
-        lexical: new JSLexical((basecolumn || 0) - indentUnit, 0, "block", false),
-        localVars: parserConfig.localVars,
-        globalVars: parserConfig.globalVars,
-        context: parserConfig.localVars && {vars: parserConfig.localVars},
-        indented: 0
-      };
-    },
-
-    token: function(stream, state) {
-      if (stream.sol()) {
-        if (!state.lexical.hasOwnProperty("align"))
-          state.lexical.align = false;
-        state.indented = stream.indentation();
-      }
-      if (state.tokenize != jsTokenComment && stream.eatSpace()) return null;
-      var style = state.tokenize(stream, state);
-      if (type == "comment") return style;
-      state.lastType = type == "operator" && (content == "++" || content == "--") ? "incdec" : type;
-      return parseJS(state, style, type, content, stream);
-    },
-
-    indent: function(state, textAfter) {
-      if (state.tokenize == jsTokenComment) return CodeMirror.Pass;
-      if (state.tokenize != jsTokenBase) return 0;
-      var firstChar = textAfter && textAfter.charAt(0), lexical = state.lexical;
-      if (lexical.type == "stat" && firstChar == "}") lexical = lexical.prev;
-      var type = lexical.type, closing = firstChar == type;
-      if (parserConfig.statementIndent != null) {
-        if (type == ")" && lexical.prev && lexical.prev.type == "stat") lexical = lexical.prev;
-        if (lexical.type == "stat") return lexical.indented + parserConfig.statementIndent;
-      }
-
-      if (type == "vardef") return lexical.indented + (state.lastType == "operator" || state.lastType == "," ? 4 : 0);
-      else if (type == "form" && firstChar == "{") return lexical.indented;
-      else if (type == "form") return lexical.indented + indentUnit;
-      else if (type == "stat")
-        return lexical.indented + (state.lastType == "operator" || state.lastType == "," ? indentUnit : 0);
-      else if (lexical.info == "switch" && !closing)
-        return lexical.indented + (/^(?:case|default)\b/.test(textAfter) ? indentUnit : 2 * indentUnit);
-      else if (lexical.align) return lexical.column + (closing ? 0 : 1);
-      else return lexical.indented + (closing ? 0 : indentUnit);
-    },
-
-    electricChars: ":{}",
-    blockCommentStart: jsonMode ? null : "/*",
-    blockCommentEnd: jsonMode ? null : "*/",
-    lineComment: jsonMode ? null : "//",
-
-    jsonMode: jsonMode
-  };
-});
-
-CodeMirror.defineMIME("text/javascript", "javascript");
-CodeMirror.defineMIME("text/ecmascript", "javascript");
-CodeMirror.defineMIME("application/javascript", "javascript");
-CodeMirror.defineMIME("application/ecmascript", "javascript");
-CodeMirror.defineMIME("application/json", {name: "javascript", json: true});
-CodeMirror.defineMIME("application/x-json", {name: "javascript", json: true});
-CodeMirror.defineMIME("text/typescript", { name: "javascript", typescript: true });
-CodeMirror.defineMIME("application/typescript", { name: "javascript", typescript: true });
-
 },{}],2:[function(require,module,exports){
 (function(){"use strict"
 
@@ -6220,7 +6220,6 @@ function checkScope(str) {
       throw new Error("Unknown global variable: " + scope.globals.implicit[i])
     }
   }
-  console.log(scope)
 }
 
 function handleChange() {
@@ -6276,9 +6275,8 @@ function tickError() {
   error_box.style["background-color"] = "rgba(" + intensity + "," + intensity + "," + intensity + "," + (0.5*(1.0-t)) + ")"
 }
 
-
 })()
-},{"./codemirror.js":4,"./cm-javascript.js":5,"lexical-scope":6,"gl-shells":7,"jquery-browserify":8}],3:[function(require,module,exports){
+},{"./codemirror.js":5,"./cm-javascript.js":4,"jquery-browserify":6,"lexical-scope":7,"gl-shells":8}],3:[function(require,module,exports){
 "use strict"
 
 var isosurface = require("isosurface")
@@ -6361,128 +6359,7 @@ onmessage = function(ev) {
     })
   }
 }
-},{"isosurface":9,"spatial-noise":10,"normals":11}],11:[function(require,module,exports){
-var EPSILON = 1e-6;
-
-//Estimate the vertex normals of a mesh
-exports.vertexNormals = function(faces, positions) {
-  
-  var N         = positions.length;
-  var normals   = new Array(N);
-  
-  //Initialize normal array
-  for(var i=0; i<N; ++i) {
-    normals[i] = [0.0, 0.0, 0.0];
-  }
-  
-  //Walk over all the faces and add per-vertex contribution to normal weights
-  for(var i=0; i<faces.length; ++i) {
-    var f = faces[i];
-    var p = 0;
-    var c = f[f.length-1];
-    var n = f[0];
-    for(var j=0; j<f.length; ++j) {
-    
-      //Shift indices back
-      p = c;
-      c = n;
-      n = f[(j+1) % f.length];
-    
-      var v0 = positions[p];
-      var v1 = positions[c];
-      var v2 = positions[n];
-      
-      //Compute infineteismal arcs
-      var d01 = new Array(3);
-      var m01 = 0.0;
-      var d21 = new Array(3);
-      var m21 = 0.0;
-      for(var k=0; k<3; ++k) {
-        d01[k] = v0[k]  - v1[k];
-        m01   += d01[k] * d01[k];
-        d21[k] = v2[k]  - v1[k];
-        m21   += d21[k] * d21[k];
-      }
-
-      //Accumulate values in normal
-      if(m01 * m21 > EPSILON) {
-        var norm = normals[c];
-        var w = 1.0 / Math.sqrt(m01 * m21);
-        for(var k=0; k<3; ++k) {
-          var u = (k+1)%3;
-          var v = (k+2)%3;
-          norm[k] += w * (d21[u] * d01[v] - d21[v] * d01[u]);
-        }
-      }
-    }
-  }
-  
-  //Scale all normals to unit length
-  for(var i=0; i<N; ++i) {
-    var norm = normals[i];
-    var m = 0.0;
-    for(var k=0; k<3; ++k) {
-      m += norm[k] * norm[k];
-    }
-    if(m > EPSILON) {
-      var w = 1.0 / Math.sqrt(m);
-      for(var k=0; k<3; ++k) {
-        norm[k] *= w;
-      }
-    } else {
-      for(var k=0; k<3; ++k) {
-        norm[k] = 0.0;
-      }
-    }
-  }
-
-  //Return the resulting set of patches
-  return normals;
-}
-
-//Compute face normals of a mesh
-exports.faceNormals = function(faces, positions) {
-  var N         = faces.length;
-  var normals   = new Array(N);
-  
-  for(var i=0; i<N; ++i) {
-    var f = faces[i];
-    var pos = new Array(3);
-    for(var j=0; j<3; ++j) {
-      pos[j] = positions[f[j]];
-    }
-    
-    var d01 = new Array(3);
-    var d21 = new Array(3);
-    for(var j=0; j<3; ++j) {
-      d01[j] = pos[1][j] - pos[0][j];
-      d21[j] = pos[2][j] - pos[0][j];
-    }
-    
-    var n = new Array(3);
-    var l = 0.0;
-    for(var j=0; j<3; ++j) {
-      var u = (j+1)%3;
-      var v = (j+2)%3;
-      n[j] = d01[u] * d21[v] - d01[v] * d21[u];
-      l += n[j] * n[j];
-    }
-    if(l > EPSILON) {
-      l = 1.0 / Math.sqrt(l);
-    } else {
-      l = 0.0;
-    }
-    for(var j=0; j<3; ++j) {
-      n[j] *= l;
-    }
-    normals[i] = n;
-  }
-  return normals;
-}
-
-
-
-},{}],8:[function(require,module,exports){
+},{"isosurface":9,"normals":10,"spatial-noise":11}],6:[function(require,module,exports){
 (function(){// Uses Node, AMD or browser globals to create a module.
 
 // If you want something that will work in other stricter CommonJS environments,
@@ -15817,12 +15694,133 @@ return jQuery;
 })( window ); }));
 
 })()
+},{}],10:[function(require,module,exports){
+var EPSILON = 1e-6;
+
+//Estimate the vertex normals of a mesh
+exports.vertexNormals = function(faces, positions) {
+  
+  var N         = positions.length;
+  var normals   = new Array(N);
+  
+  //Initialize normal array
+  for(var i=0; i<N; ++i) {
+    normals[i] = [0.0, 0.0, 0.0];
+  }
+  
+  //Walk over all the faces and add per-vertex contribution to normal weights
+  for(var i=0; i<faces.length; ++i) {
+    var f = faces[i];
+    var p = 0;
+    var c = f[f.length-1];
+    var n = f[0];
+    for(var j=0; j<f.length; ++j) {
+    
+      //Shift indices back
+      p = c;
+      c = n;
+      n = f[(j+1) % f.length];
+    
+      var v0 = positions[p];
+      var v1 = positions[c];
+      var v2 = positions[n];
+      
+      //Compute infineteismal arcs
+      var d01 = new Array(3);
+      var m01 = 0.0;
+      var d21 = new Array(3);
+      var m21 = 0.0;
+      for(var k=0; k<3; ++k) {
+        d01[k] = v0[k]  - v1[k];
+        m01   += d01[k] * d01[k];
+        d21[k] = v2[k]  - v1[k];
+        m21   += d21[k] * d21[k];
+      }
+
+      //Accumulate values in normal
+      if(m01 * m21 > EPSILON) {
+        var norm = normals[c];
+        var w = 1.0 / Math.sqrt(m01 * m21);
+        for(var k=0; k<3; ++k) {
+          var u = (k+1)%3;
+          var v = (k+2)%3;
+          norm[k] += w * (d21[u] * d01[v] - d21[v] * d01[u]);
+        }
+      }
+    }
+  }
+  
+  //Scale all normals to unit length
+  for(var i=0; i<N; ++i) {
+    var norm = normals[i];
+    var m = 0.0;
+    for(var k=0; k<3; ++k) {
+      m += norm[k] * norm[k];
+    }
+    if(m > EPSILON) {
+      var w = 1.0 / Math.sqrt(m);
+      for(var k=0; k<3; ++k) {
+        norm[k] *= w;
+      }
+    } else {
+      for(var k=0; k<3; ++k) {
+        norm[k] = 0.0;
+      }
+    }
+  }
+
+  //Return the resulting set of patches
+  return normals;
+}
+
+//Compute face normals of a mesh
+exports.faceNormals = function(faces, positions) {
+  var N         = faces.length;
+  var normals   = new Array(N);
+  
+  for(var i=0; i<N; ++i) {
+    var f = faces[i];
+    var pos = new Array(3);
+    for(var j=0; j<3; ++j) {
+      pos[j] = positions[f[j]];
+    }
+    
+    var d01 = new Array(3);
+    var d21 = new Array(3);
+    for(var j=0; j<3; ++j) {
+      d01[j] = pos[1][j] - pos[0][j];
+      d21[j] = pos[2][j] - pos[0][j];
+    }
+    
+    var n = new Array(3);
+    var l = 0.0;
+    for(var j=0; j<3; ++j) {
+      var u = (j+1)%3;
+      var v = (j+2)%3;
+      n[j] = d01[u] * d21[v] - d01[v] * d21[u];
+      l += n[j] * n[j];
+    }
+    if(l > EPSILON) {
+      l = 1.0 / Math.sqrt(l);
+    } else {
+      l = 0.0;
+    }
+    for(var j=0; j<3; ++j) {
+      n[j] *= l;
+    }
+    normals[i] = n;
+  }
+  return normals;
+}
+
+
+
 },{}],9:[function(require,module,exports){
 exports.surfaceNets         = require("./lib/surfacenets.js").surfaceNets;
 exports.marchingCubes       = require("./lib/marchingcubes.js").marchingCubes;
 exports.marchingTetrahedra  = require("./lib/marchingtetrahedra.js").marchingTetrahedra;
 
-},{"./lib/surfacenets.js":12,"./lib/marchingcubes.js":13,"./lib/marchingtetrahedra.js":14}],7:[function(require,module,exports){
+},{"./lib/surfacenets.js":12,"./lib/marchingcubes.js":13,"./lib/marchingtetrahedra.js":14}],8:[function(require,module,exports){
 exports.GLOW        = require("./GLOW.js").GLOW;
 exports.makeShell   = require("./shell.js").makeShell;
 exports.makeViewer  = require("./viewer.js").makeViewer;
@@ -16757,7 +16755,7 @@ GLOW.ShaderUtils={createMultiple:function(b,a){if(b.triangles===void 0||b.data==
 break}c[j]=j++;c[j]=j++;c[j]=j++;for(k in a){i=e[k];size=a[k];for(o=0;o<3;o++){l=0;for(m=size;l<m;l++)g[k].push(i[f[n+o]*size+l])}}}}while(n<r);for(k in a)b.data[k]=h[0][k];b.triangles=h[0].elements;c=new GLOW.Shader(b);f=[c];for(n=1;n<h.length;n++){for(k in a)b.data[k]=h[n][k];e=GLOW.Compiler.createAttributes(GLOW.Compiler.extractAttributes(c.compiledData.program),b.data,b.usage,b.interleave);e=GLOW.Compiler.interleaveAttributes(e,b.interleave);for(l in e)h[n][l]=e[l];f[n]=c.clone(h[n])}return f}}};
 exports.GLOW = GLOW;
 
-},{}],6:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 var astw = require('astw');
 
 module.exports = function (src) {
@@ -16923,7 +16921,7 @@ function indexOf (xs, x) {
     return -1;
 }
 
-},{"astw":18}],10:[function(require,module,exports){
+},{"astw":18}],11:[function(require,module,exports){
 "use strict"
 
 var hashInt       = require("hash-int")
@@ -17542,7 +17540,146 @@ ArcballCamera.prototype.matrix = function() {
 
 exports.ArcballCamera = ArcballCamera;
 
-},{}],24:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
+//Import libraries
+var $             = require('jquery-browserify')
+  , GLOW          = require('./GLOW.js').GLOW
+  , ArcballCamera = require('arcball').ArcballCamera
+  , utils         = require('./utils.js')
+  , EventEmitter  = require('events').EventEmitter;
+
+exports.makeShell = function(params) {
+  if(!params) {
+    params = {};
+  }
+  var shell = {};
+  var bg_color    = params.bg_color   || [ 0.3, 0.5, 0.87 ]
+    , camera_pos  = params.camera_pos || [ 0, 0, 50 ]
+    , container   = params.container  || "#container";
+
+  var citem = $(container)[0]
+
+  //Create event emitter
+  shell.events = new EventEmitter();
+
+  //Initialize GLOW
+  shell.context = new GLOW.Context({ width:citem.clientWidth, height:citem.clientHeight });
+  shell.context.setupClear({
+      red:    bg_color[0]
+    , green:  bg_color[1]
+    , blue:   bg_color[2]
+  });
+  GLOW.defaultCamera.localMatrix.setPosition(
+      camera_pos[0]
+    , camera_pos[1]
+    , camera_pos[2]
+  );
+  GLOW.defaultCamera.update();
+  
+  //Create arcball camera
+  shell.camera = new ArcballCamera();
+  shell.buttons = {
+      rotate: false
+    , pan: false
+    , zoom: false
+  };
+  
+  //Hook up controls
+  var buttons = shell.buttons;
+  shell.container = container;
+  $(container)[0].appendChild( shell.context.domElement );
+  $(container).mousemove(function(e) {
+    var c = $(container);
+    shell.camera.update(e.pageX/c.width()-0.5, e.pageY/c.height()-0.5, {
+      rotate: buttons.rotate || !(e.ctrlKey || e.shiftKey) && (e.which === 1),
+      pan:    buttons.pan    || (e.ctrlKey && e.which !== 0) || (e.which === 2),
+      zoom:   buttons.zoom   || (e.shiftlKey && e.which !== 0) || e.which === 3
+    })
+  });
+  $(document).keydown(function(e) {
+    if(e.keyCode === 65) {
+      buttons.rotate = true;
+    }
+    if(e.keyCode === 83) {
+      buttons.pan = true;
+    }
+    if(e.keyCode === 68) {
+      buttons.zoom = true;
+    }
+  });
+  $(document).keyup(function(e) {
+    if(e.keyCode === 65) {
+      buttons.rotate = false;
+    }
+    if(e.keyCode === 83) {
+      buttons.pan = false;
+    }
+    if(e.keyCode === 68) {
+      buttons.zoom = false;
+    }
+  });
+  $(container).blur(function(e) {
+    buttons.rotate = buttons.pan = buttons.zoom = false;
+  })
+  
+  var forceUpdate = false
+  
+  function updateShape() {
+    var w = citem.clientWidth|0
+    var h = citem.clientHeight|0
+    if(forceUpdate ||
+       w !== shell.context.domElement.width ||
+       h !== shell.context.domElement.height ) {
+      shell.context.width = w;
+      shell.context.height = h;
+      shell.context.viewport.width = w;
+      shell.context.viewport.height = h;
+      shell.context.domElement.width = w;
+      shell.context.domElement.height = h;
+      GLOW.defaultCamera.aspect = w / h;
+      GLOW.Matrix4.makeProjection(
+        GLOW.defaultCamera.fov,
+        GLOW.defaultCamera.aspect,
+        GLOW.defaultCamera.near,
+        GLOW.defaultCamera.far,
+        GLOW.defaultCamera.projection
+      );
+      forceUpdate = false
+    }
+  }
+  $(container).bind("DOMSubtreeModified", updateShape)
+  $(window).resize(updateShape)
+  shell.updateShape = function() {
+    forceUpdate = true
+    updateShape()
+  }
+  
+  //Render loop
+  function render() {
+    shell.context.cache.clear();
+    shell.context.setViewport();
+    GLOW.defaultCamera.update()
+    shell.context.enableDepthTest(true);
+    if(params.cullCW) {
+      shell.context.enableCulling(true, {frontFace: GL.CW, cullFace: GL.BACK});
+    } else if(params.cullCCW) {
+      shell.context.enableCulling(true, {frontFace: GL.CCW, cullFace: GL.BACK});
+    } else {
+      shell.context.enableCulling(false);
+    }
+    shell.context.clear();
+  
+    shell.events.emit("render");
+    
+    utils.nextFrame(render);
+  }
+  shell.updateShape();
+  render();
+  
+  return shell;
+}
+
+},{"events":22,"./GLOW.js":15,"./utils.js":23,"arcball":25,"jquery-browserify":6}],24:[function(require,module,exports){
 (function(){/*
   Copyright (C) 2012 Ariya Hidayat <ariya.hidayat@gmail.com>
   Copyright (C) 2012 Mathias Bynens <mathias@qiwi.be>
@@ -21440,140 +21577,7 @@ parseStatement: true, parseSourceElement: true */
 /* vim: set sw=4 ts=4 et tw=80 : */
 
 })()
-},{}],16:[function(require,module,exports){
-//Import libraries
-var $             = require('jquery-browserify')
-  , GLOW          = require('./GLOW.js').GLOW
-  , ArcballCamera = require('arcball').ArcballCamera
-  , utils         = require('./utils.js')
-  , EventEmitter  = require('events').EventEmitter;
-
-exports.makeShell = function(params) {
-  if(!params) {
-    params = {};
-  }
-  var shell = {};
-  var bg_color    = params.bg_color   || [ 0.3, 0.5, 0.87 ]
-    , camera_pos  = params.camera_pos || [ 0, 0, 50 ]
-    , container   = params.container  || "#container";
-
-  var citem = $(container)[0]
-
-  //Create event emitter
-  shell.events = new EventEmitter({ width:citem.clientWidth, height:citem.clientHeight });
-
-  //Initialize GLOW
-  shell.context = new GLOW.Context();
-  shell.context.setupClear({
-      red:    bg_color[0]
-    , green:  bg_color[1]
-    , blue:   bg_color[2]
-  });
-  GLOW.defaultCamera.localMatrix.setPosition(
-      camera_pos[0]
-    , camera_pos[1]
-    , camera_pos[2]
-  );
-  GLOW.defaultCamera.update();
-  
-  //Create arcball camera
-  shell.camera = new ArcballCamera();
-  shell.buttons = {
-      rotate: false
-    , pan: false
-    , zoom: false
-  };
-  
-  //Hook up controls
-  var buttons = shell.buttons;
-  shell.container = container;
-  $(container)[0].appendChild( shell.context.domElement );
-  $(container).mousemove(function(e) {
-    var c = $(container);
-    shell.camera.update(e.pageX/c.width()-0.5, e.pageY/c.height()-0.5, {
-      rotate: buttons.rotate || !(e.ctrlKey || e.shiftKey) && (e.which === 1),
-      pan:    buttons.pan    || (e.ctrlKey && e.which !== 0) || (e.which === 2),
-      zoom:   buttons.zoom   || (e.shiftlKey && e.which !== 0) || e.which === 3
-    })
-  });
-  $(document).keydown(function(e) {
-    if(e.keyCode === 65) {
-      buttons.rotate = true;
-    }
-    if(e.keyCode === 83) {
-      buttons.pan = true;
-    }
-    if(e.keyCode === 68) {
-      buttons.zoom = true;
-    }
-  });
-  $(document).keyup(function(e) {
-    if(e.keyCode === 65) {
-      buttons.rotate = false;
-    }
-    if(e.keyCode === 83) {
-      buttons.pan = false;
-    }
-    if(e.keyCode === 68) {
-      buttons.zoom = false;
-    }
-  });
-  $(container).blur(function(e) {
-    buttons.rotate = buttons.pan = buttons.zoom = false;
-  })
-  
-  function updateShape() {
-    var w = citem.clientWidth|0
-    var h = citem.clientHeight|0
-    if(w !== shell.context.domElement.width ||
-       h !== shell.context.domElement.height ) {
-      shell.context.width = w;
-      shell.context.height = h;
-      shell.context.viewport.width = w;
-      shell.context.viewport.height = h;
-      shell.context.domElement.width = w;
-      shell.context.domElement.height = h;
-      GLOW.defaultCamera.aspect = w / h;
-      GLOW.Matrix4.makeProjection(
-        GLOW.defaultCamera.fov,
-        GLOW.defaultCamera.aspect,
-        GLOW.defaultCamera.near,
-        GLOW.defaultCamera.far,
-        GLOW.defaultCamera.projection
-      );
-    }
-    
-  }
-  $(container).bind("DOMSubtreeModified", updateShape)
-  $(window).resize(updateShape)
-  shell.updateShape = updateShape
-  
-  //Render loop
-  function render() {
-    shell.context.cache.clear();
-    shell.context.setViewport();
-    GLOW.defaultCamera.update()
-    shell.context.enableDepthTest(true);
-    if(params.cullCW) {
-      shell.context.enableCulling(true, {frontFace: GL.CW, cullFace: GL.BACK});
-    } else if(params.cullCCW) {
-      shell.context.enableCulling(true, {frontFace: GL.CCW, cullFace: GL.BACK});
-    } else {
-      shell.context.enableCulling(false);
-    }
-    shell.context.clear();
-  
-    shell.events.emit("render");
-    
-    utils.nextFrame(render);
-  }
-  
-  render();
-  
-  return shell;
-}
-
-},{"events":22,"./GLOW.js":15,"./utils.js":23,"arcball":25,"jquery-browserify":8}],17:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 //Simple mesh viewer
 var $             = require("jquery-browserify")
   , GLOW          = require("./GLOW.js").GLOW
@@ -21787,5 +21791,5 @@ exports.makeViewer = function(params) {
   return shell;
 }
 
-},{"./GLOW.js":15,"./utils.js":23,"./shell.js":16,"jquery-browserify":8,"normals":11}]},{},[1])
+},{"./utils.js":23,"./GLOW.js":15,"./shell.js":16,"jquery-browserify":6,"normals":10}]},{},[1])
 ;
