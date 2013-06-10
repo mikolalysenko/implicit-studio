@@ -42,14 +42,6 @@
       border-radius: 5px;
       z-index: 10;
     }
-    
-    #container {
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      top: 0;
-    }
   
     #dimspane {
       position: absolute;
@@ -63,6 +55,16 @@
       border-radius: 5px;
       color: rgb(255,255,255);
     }
+
+    
+    #container {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 70%;
+    }
     
     #editpane {
       position: absolute;
@@ -73,7 +75,7 @@
       padding-left: 2%;
       padding-right: 2%;
       padding-top: 10px;
-      background-color: rgba(255, 255, 255, 0.5);
+      background-color: rgba(200,200,200, 1);
       height: 30%;
       z-index:10;
       resize: vertical;
@@ -139,7 +141,7 @@
       </table>
     </div>
     
-<div draggable="true" id="editpane">
+<div id="editpane">
 <div class="cm_container_left">
 <textarea id="potential">
 //Potential function of x,y,z
