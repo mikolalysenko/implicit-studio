@@ -6130,6 +6130,9 @@ var ERROR_FADE_TIME = 1*1000
 require("./codemirror.js")
 require("./cm-javascript.js")
 
+var $ = require("jquery-browserify")
+
+//Import lexical scope
 var lexicalScope = require("lexical-scope")
 
 //Read in all the HTML elements
@@ -6275,7 +6278,7 @@ function tickError() {
 
 
 })()
-},{"./codemirror.js":4,"./cm-javascript.js":5,"lexical-scope":6,"gl-shells":7}],3:[function(require,module,exports){
+},{"./codemirror.js":4,"./cm-javascript.js":5,"lexical-scope":6,"gl-shells":7,"jquery-browserify":8}],3:[function(require,module,exports){
 "use strict"
 
 var isosurface = require("isosurface")
@@ -6358,7 +6361,7 @@ onmessage = function(ev) {
     })
   }
 }
-},{"isosurface":8,"spatial-noise":9,"normals":10}],10:[function(require,module,exports){
+},{"isosurface":9,"spatial-noise":10,"normals":11}],11:[function(require,module,exports){
 var EPSILON = 1e-6;
 
 //Estimate the vertex normals of a mesh
@@ -6480,1914 +6483,6 @@ exports.faceNormals = function(faces, positions) {
 
 
 },{}],8:[function(require,module,exports){
-exports.surfaceNets         = require("./lib/surfacenets.js").surfaceNets;
-exports.marchingCubes       = require("./lib/marchingcubes.js").marchingCubes;
-exports.marchingTetrahedra  = require("./lib/marchingtetrahedra.js").marchingTetrahedra;
-
-},{"./lib/surfacenets.js":11,"./lib/marchingtetrahedra.js":12,"./lib/marchingcubes.js":13}],7:[function(require,module,exports){
-exports.GLOW        = require("./GLOW.js").GLOW;
-exports.makeShell   = require("./shell.js").makeShell;
-exports.makeViewer  = require("./viewer.js").makeViewer;
-
-},{"./GLOW.js":14,"./shell.js":15,"./viewer.js":16}],11:[function(require,module,exports){
-/**
- * SurfaceNets in JavaScript
- *
- * Written by Mikola Lysenko (C) 2012
- *
- * MIT License
- *
- * Based on: S.F. Gibson, "Constrained Elastic Surface Nets". (1998) MERL Tech Report.
- */
-"use strict";
-
-//Precompute edge table, like Paul Bourke does.
-// This saves a bit of time when computing the centroid of each boundary cell
-var cube_edges = new Int32Array(24)
-  , edge_table = new Int32Array(256);
-(function() {
-
-  //Initialize the cube_edges table
-  // This is just the vertex number of each cube
-  var k = 0;
-  for(var i=0; i<8; ++i) {
-    for(var j=1; j<=4; j<<=1) {
-      var p = i^j;
-      if(i <= p) {
-        cube_edges[k++] = i;
-        cube_edges[k++] = p;
-      }
-    }
-  }
-
-  //Initialize the intersection table.
-  //  This is a 2^(cube configuration) ->  2^(edge configuration) map
-  //  There is one entry for each possible cube configuration, and the output is a 12-bit vector enumerating all edges crossing the 0-level.
-  for(var i=0; i<256; ++i) {
-    var em = 0;
-    for(var j=0; j<24; j+=2) {
-      var a = !!(i & (1<<cube_edges[j]))
-        , b = !!(i & (1<<cube_edges[j+1]));
-      em |= a !== b ? (1 << (j >> 1)) : 0;
-    }
-    edge_table[i] = em;
-  }
-})();
-
-//Internal buffer, this may get resized at run time
-var buffer = new Array(4096);
-(function() {
-  for(var i=0; i<buffer.length; ++i) {
-    buffer[i] = 0;
-  }
-})();
-
-exports.surfaceNets = function(dims, potential, bounds) {
-  if(!bounds) {
-    bounds = [[0,0,0],dims];
-  }
-  
-  var scale     = [0,0,0];
-  var shift     = [0,0,0];
-  for(var i=0; i<3; ++i) {
-    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
-    shift[i] = bounds[0][i];
-  }
-  
-  var vertices = []
-    , faces = []
-    , n = 0
-    , x = [0, 0, 0]
-    , R = [1, (dims[0]+1), (dims[0]+1)*(dims[1]+1)]
-    , grid = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    , buf_no = 1;
-  
-   
-  //Resize buffer if necessary 
-  if(R[2] * 2 > buffer.length) {
-    var ol = buffer.length;
-    buffer.length = R[2] * 2;
-    while(ol < buffer.length) {
-      buffer[ol++] = 0;
-    }
-  }
-  
-  //March over the voxel grid
-  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0], buf_no ^= 1, R[2]=-R[2]) {
-  
-    //m is the pointer into the buffer we are going to use.  
-    //This is slightly obtuse because javascript does not have good support for packed data structures, so we must use typed arrays :(
-    //The contents of the buffer will be the indices of the vertices on the previous x/y slice of the volume
-    var m = 1 + (dims[0]+1) * (1 + buf_no * (dims[1]+1));
-    
-    for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n, m+=2)
-    for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n, ++m) {
-    
-      //Read in 8 field values around this vertex and store them in an array
-      //Also calculate 8-bit mask, like in marching cubes, so we can speed up sign checks later
-      var mask = 0, g = 0;
-      for(var k=0; k<2; ++k)
-      for(var j=0; j<2; ++j)      
-      for(var i=0; i<2; ++i, ++g) {
-        var p = potential(
-          scale[0]*(x[0]+i)+shift[0],
-          scale[1]*(x[1]+j)+shift[1],
-          scale[2]*(x[2]+k)+shift[2]);
-        grid[g] = p;
-        mask |= (p < 0) ? (1<<g) : 0;
-      }
-      
-      //Check for early termination if cell does not intersect boundary
-      if(mask === 0 || mask === 0xff) {
-        continue;
-      }
-      
-      //Sum up edge intersections
-      var edge_mask = edge_table[mask]
-        , v = [0.0,0.0,0.0]
-        , e_count = 0;
-        
-      //For every edge of the cube...
-      for(var i=0; i<12; ++i) {
-      
-        //Use edge mask to check if it is crossed
-        if(!(edge_mask & (1<<i))) {
-          continue;
-        }
-        
-        //If it did, increment number of edge crossings
-        ++e_count;
-        
-        //Now find the point of intersection
-        var e0 = cube_edges[ i<<1 ]       //Unpack vertices
-          , e1 = cube_edges[(i<<1)+1]
-          , g0 = grid[e0]                 //Unpack grid values
-          , g1 = grid[e1]
-          , t  = g0 - g1;                 //Compute point of intersection
-        if(Math.abs(t) > 1e-6) {
-          t = g0 / t;
-        } else {
-          continue;
-        }
-        
-        //Interpolate vertices and add up intersections (this can be done without multiplying)
-        for(var j=0, k=1; j<3; ++j, k<<=1) {
-          var a = e0 & k
-            , b = e1 & k;
-          if(a !== b) {
-            v[j] += a ? 1.0 - t : t;
-          } else {
-            v[j] += a ? 1.0 : 0;
-          }
-        }
-      }
-      
-      //Now we just average the edge intersections and add them to coordinate
-      var s = 1.0 / e_count;
-      for(var i=0; i<3; ++i) {
-        v[i] = scale[i] * (x[i] + s * v[i]) + shift[i];
-      }
-      
-      //Add vertex to buffer, store pointer to vertex index in buffer
-      buffer[m] = vertices.length;
-      vertices.push(v);
-      
-      //Now we need to add faces together, to do this we just loop over 3 basis components
-      for(var i=0; i<3; ++i) {
-        //The first three entries of the edge_mask count the crossings along the edge
-        if(!(edge_mask & (1<<i)) ) {
-          continue;
-        }
-        
-        // i = axes we are point along.  iu, iv = orthogonal axes
-        var iu = (i+1)%3
-          , iv = (i+2)%3;
-          
-        //If we are on a boundary, skip it
-        if(x[iu] === 0 || x[iv] === 0) {
-          continue;
-        }
-        
-        //Otherwise, look up adjacent edges in buffer
-        var du = R[iu]
-          , dv = R[iv];
-        
-        //Remember to flip orientation depending on the sign of the corner.
-        if(mask & 1) {
-          faces.push([buffer[m],    buffer[m-du],    buffer[m-dv]]);
-          faces.push([buffer[m-dv], buffer[m-du],    buffer[m-du-dv]]);
-        } else {
-          faces.push([buffer[m],    buffer[m-dv],    buffer[m-du]]);
-          faces.push([buffer[m-du], buffer[m-dv],    buffer[m-du-dv]]);
-        }
-      }
-    }
-  }
-  
-  //All done!  Return the result
-  return { positions: vertices, cells: faces };
-};
-
-},{}],12:[function(require,module,exports){
-/**
- * Marching Tetrahedra in Javascript
- *
- * Based on Paul Bourke's implementation
- *  http://local.wasp.uwa.edu.au/~pbourke/geometry/polygonise/
- *
- * (Several bug fixes were made to deal with oriented faces)
- *
- * Javascript port by Mikola Lysenko
- */
-var cube_vertices = [
-        [0,0,0]
-      , [1,0,0]
-      , [1,1,0]
-      , [0,1,0]
-      , [0,0,1]
-      , [1,0,1]
-      , [1,1,1]
-      , [0,1,1] ]
-  , tetra_list = [
-        [0,2,3,7]
-      , [0,6,2,7]
-      , [0,4,6,7]
-      , [0,6,1,2]
-      , [0,1,6,4]
-      , [5,6,1,4] ];
-
-exports.marchingTetrahedra = function(dims, potential, bounds) {
-
-  if(!bounds) {
-    bounds = [[0,0,0], dims];
-  }
-  
-  var scale     = [0,0,0];
-  var shift     = [0,0,0];
-  for(var i=0; i<3; ++i) {
-    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
-    shift[i] = bounds[0][i];
-  }
-   
-   var vertices = []
-    , faces = []
-    , n = 0
-    , grid = new Float32Array(8)
-    , edges = new Int32Array(12)
-    , x = [0,0,0];
-    
-  function interp(i0, i1) {
-    var g0 = grid[i0]
-      , g1 = grid[i1]
-      , p0 = cube_vertices[i0]
-      , p1 = cube_vertices[i1]
-      , v  = [x[0], x[1], x[2]]
-      , t = g0 - g1;
-    if(Math.abs(t) > 1e-6) {
-      t = g0 / t;
-    }
-    for(var i=0; i<3; ++i) {
-      v[i] = scale[i] * (v[i] + p0[i] + t * (p1[i] - p0[i])) + shift[i];
-    }
-    vertices.push(v);
-    return vertices.length - 1;
-  }
-  
-  //March over the volume
-  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0])
-  for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n)
-  for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n) {
-    //Read in cube  
-    for(var i=0; i<8; ++i) {
-      var cube_vert = cube_vertices[i];
-      grid[i] = potential(
-        scale[0]*(x[0]+cube_vert[0])+shift[0],
-        scale[1]*(x[1]+cube_vert[1])+shift[1],
-        scale[2]*(x[2]+cube_vert[2])+shift[2]);
-    }
-    for(var i=0; i<tetra_list.length; ++i) {
-      var T = tetra_list[i]
-        , triindex = 0;
-      if (grid[T[0]] < 0) triindex |= 1;
-      if (grid[T[1]] < 0) triindex |= 2;
-      if (grid[T[2]] < 0) triindex |= 4;
-      if (grid[T[3]] < 0) triindex |= 8;
-      
-      //Handle each case
-      switch (triindex) {
-        case 0x00:
-        case 0x0F:
-        break;
-        case 0x0E:
-          faces.push([ 
-              interp(T[0], T[1])
-            , interp(T[0], T[3]) 
-            , interp(T[0], T[2]) ]);
-        break;
-        case 0x01:
-          faces.push([ 
-              interp(T[0], T[1])
-            , interp(T[0], T[2])
-            , interp(T[0], T[3])  ]);
-        break;
-        case 0x0D:
-          faces.push([ 
-              interp(T[1], T[0])
-            , interp(T[1], T[2]) 
-            , interp(T[1], T[3]) ]);
-        break;
-        case 0x02:
-          faces.push([ 
-              interp(T[1], T[0])
-            , interp(T[1], T[3])
-            , interp(T[1], T[2]) ]);
-        break;
-        case 0x0C:
-          faces.push([ 
-                interp(T[1], T[2])
-              , interp(T[1], T[3])
-              , interp(T[0], T[3])
-              , interp(T[0], T[2]) ]);
-        break;
-        case 0x03:
-          faces.push([ 
-                interp(T[1], T[2])
-              , interp(T[0], T[2])
-              , interp(T[0], T[3])
-              , interp(T[1], T[3]) ]);
-        break;
-        case 0x04:
-          faces.push([ 
-                interp(T[2], T[0])
-              , interp(T[2], T[1])
-              , interp(T[2], T[3]) ]);
-        break;
-        case 0x0B:
-          faces.push([ 
-                interp(T[2], T[0])
-              , interp(T[2], T[3]) 
-              , interp(T[2], T[1]) ]);
-        break;
-        case 0x05:
-          faces.push([ 
-                interp(T[0], T[1])
-              , interp(T[1], T[2])
-              , interp(T[2], T[3])
-              , interp(T[0], T[3]) ]);
-        break;
-        case 0x0A:
-          faces.push([ 
-                interp(T[0], T[1])
-              , interp(T[0], T[3])
-              , interp(T[2], T[3])
-              , interp(T[1], T[2]) ]);
-        break;
-        case 0x06:
-          faces.push([ 
-                interp(T[2], T[3])
-              , interp(T[0], T[2])
-              , interp(T[0], T[1])
-              , interp(T[1], T[3]) ]);
-        break;
-        case 0x09:
-          faces.push([ 
-                interp(T[2], T[3])
-              , interp(T[1], T[3])
-              , interp(T[0], T[1])
-              , interp(T[0], T[2]) ]);
-        break;
-        case 0x07:
-          faces.push([ 
-                interp(T[3], T[0])
-              , interp(T[3], T[1])
-              , interp(T[3], T[2]) ]);
-        break;
-        case 0x08:
-          faces.push([ 
-                interp(T[3], T[0])
-              , interp(T[3], T[2])
-              , interp(T[3], T[1]) ]);
-        break;
-      }
-    }
-  }
-  
-  return { positions: vertices, cells: faces };
-}
-
-
-},{}],13:[function(require,module,exports){
-/**
- * Javascript Marching Cubes
- *
- * Based on Paul Bourke's classic implementation:
- *    http://local.wasp.uwa.edu.au/~pbourke/geometry/polygonise/
- *
- * JS port by Mikola Lysenko
- */
-
-var edgeTable= new Uint32Array([
-      0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
-      0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
-      0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
-      0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
-      0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
-      0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
-      0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
-      0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
-      0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
-      0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
-      0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
-      0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
-      0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
-      0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
-      0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
-      0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
-      0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
-      0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
-      0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
-      0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
-      0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
-      0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
-      0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
-      0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
-      0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
-      0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
-      0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
-      0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
-      0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
-      0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
-      0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
-      0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   ])
-  , triTable = [
-      [],
-      [0, 8, 3],
-      [0, 1, 9],
-      [1, 8, 3, 9, 8, 1],
-      [1, 2, 10],
-      [0, 8, 3, 1, 2, 10],
-      [9, 2, 10, 0, 2, 9],
-      [2, 8, 3, 2, 10, 8, 10, 9, 8],
-      [3, 11, 2],
-      [0, 11, 2, 8, 11, 0],
-      [1, 9, 0, 2, 3, 11],
-      [1, 11, 2, 1, 9, 11, 9, 8, 11],
-      [3, 10, 1, 11, 10, 3],
-      [0, 10, 1, 0, 8, 10, 8, 11, 10],
-      [3, 9, 0, 3, 11, 9, 11, 10, 9],
-      [9, 8, 10, 10, 8, 11],
-      [4, 7, 8],
-      [4, 3, 0, 7, 3, 4],
-      [0, 1, 9, 8, 4, 7],
-      [4, 1, 9, 4, 7, 1, 7, 3, 1],
-      [1, 2, 10, 8, 4, 7],
-      [3, 4, 7, 3, 0, 4, 1, 2, 10],
-      [9, 2, 10, 9, 0, 2, 8, 4, 7],
-      [2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4],
-      [8, 4, 7, 3, 11, 2],
-      [11, 4, 7, 11, 2, 4, 2, 0, 4],
-      [9, 0, 1, 8, 4, 7, 2, 3, 11],
-      [4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1],
-      [3, 10, 1, 3, 11, 10, 7, 8, 4],
-      [1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4],
-      [4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3],
-      [4, 7, 11, 4, 11, 9, 9, 11, 10],
-      [9, 5, 4],
-      [9, 5, 4, 0, 8, 3],
-      [0, 5, 4, 1, 5, 0],
-      [8, 5, 4, 8, 3, 5, 3, 1, 5],
-      [1, 2, 10, 9, 5, 4],
-      [3, 0, 8, 1, 2, 10, 4, 9, 5],
-      [5, 2, 10, 5, 4, 2, 4, 0, 2],
-      [2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8],
-      [9, 5, 4, 2, 3, 11],
-      [0, 11, 2, 0, 8, 11, 4, 9, 5],
-      [0, 5, 4, 0, 1, 5, 2, 3, 11],
-      [2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5],
-      [10, 3, 11, 10, 1, 3, 9, 5, 4],
-      [4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10],
-      [5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3],
-      [5, 4, 8, 5, 8, 10, 10, 8, 11],
-      [9, 7, 8, 5, 7, 9],
-      [9, 3, 0, 9, 5, 3, 5, 7, 3],
-      [0, 7, 8, 0, 1, 7, 1, 5, 7],
-      [1, 5, 3, 3, 5, 7],
-      [9, 7, 8, 9, 5, 7, 10, 1, 2],
-      [10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3],
-      [8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2],
-      [2, 10, 5, 2, 5, 3, 3, 5, 7],
-      [7, 9, 5, 7, 8, 9, 3, 11, 2],
-      [9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11],
-      [2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7],
-      [11, 2, 1, 11, 1, 7, 7, 1, 5],
-      [9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11],
-      [5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0],
-      [11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0],
-      [11, 10, 5, 7, 11, 5],
-      [10, 6, 5],
-      [0, 8, 3, 5, 10, 6],
-      [9, 0, 1, 5, 10, 6],
-      [1, 8, 3, 1, 9, 8, 5, 10, 6],
-      [1, 6, 5, 2, 6, 1],
-      [1, 6, 5, 1, 2, 6, 3, 0, 8],
-      [9, 6, 5, 9, 0, 6, 0, 2, 6],
-      [5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8],
-      [2, 3, 11, 10, 6, 5],
-      [11, 0, 8, 11, 2, 0, 10, 6, 5],
-      [0, 1, 9, 2, 3, 11, 5, 10, 6],
-      [5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11],
-      [6, 3, 11, 6, 5, 3, 5, 1, 3],
-      [0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6],
-      [3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9],
-      [6, 5, 9, 6, 9, 11, 11, 9, 8],
-      [5, 10, 6, 4, 7, 8],
-      [4, 3, 0, 4, 7, 3, 6, 5, 10],
-      [1, 9, 0, 5, 10, 6, 8, 4, 7],
-      [10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4],
-      [6, 1, 2, 6, 5, 1, 4, 7, 8],
-      [1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7],
-      [8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6],
-      [7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9],
-      [3, 11, 2, 7, 8, 4, 10, 6, 5],
-      [5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11],
-      [0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6],
-      [9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6],
-      [8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6],
-      [5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11],
-      [0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7],
-      [6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9],
-      [10, 4, 9, 6, 4, 10],
-      [4, 10, 6, 4, 9, 10, 0, 8, 3],
-      [10, 0, 1, 10, 6, 0, 6, 4, 0],
-      [8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10],
-      [1, 4, 9, 1, 2, 4, 2, 6, 4],
-      [3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4],
-      [0, 2, 4, 4, 2, 6],
-      [8, 3, 2, 8, 2, 4, 4, 2, 6],
-      [10, 4, 9, 10, 6, 4, 11, 2, 3],
-      [0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6],
-      [3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10],
-      [6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1],
-      [9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3],
-      [8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1],
-      [3, 11, 6, 3, 6, 0, 0, 6, 4],
-      [6, 4, 8, 11, 6, 8],
-      [7, 10, 6, 7, 8, 10, 8, 9, 10],
-      [0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10],
-      [10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0],
-      [10, 6, 7, 10, 7, 1, 1, 7, 3],
-      [1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7],
-      [2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9],
-      [7, 8, 0, 7, 0, 6, 6, 0, 2],
-      [7, 3, 2, 6, 7, 2],
-      [2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7],
-      [2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7],
-      [1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11],
-      [11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1],
-      [8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6],
-      [0, 9, 1, 11, 6, 7],
-      [7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0],
-      [7, 11, 6],
-      [7, 6, 11],
-      [3, 0, 8, 11, 7, 6],
-      [0, 1, 9, 11, 7, 6],
-      [8, 1, 9, 8, 3, 1, 11, 7, 6],
-      [10, 1, 2, 6, 11, 7],
-      [1, 2, 10, 3, 0, 8, 6, 11, 7],
-      [2, 9, 0, 2, 10, 9, 6, 11, 7],
-      [6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8],
-      [7, 2, 3, 6, 2, 7],
-      [7, 0, 8, 7, 6, 0, 6, 2, 0],
-      [2, 7, 6, 2, 3, 7, 0, 1, 9],
-      [1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6],
-      [10, 7, 6, 10, 1, 7, 1, 3, 7],
-      [10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8],
-      [0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7],
-      [7, 6, 10, 7, 10, 8, 8, 10, 9],
-      [6, 8, 4, 11, 8, 6],
-      [3, 6, 11, 3, 0, 6, 0, 4, 6],
-      [8, 6, 11, 8, 4, 6, 9, 0, 1],
-      [9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6],
-      [6, 8, 4, 6, 11, 8, 2, 10, 1],
-      [1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6],
-      [4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9],
-      [10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3],
-      [8, 2, 3, 8, 4, 2, 4, 6, 2],
-      [0, 4, 2, 4, 6, 2],
-      [1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8],
-      [1, 9, 4, 1, 4, 2, 2, 4, 6],
-      [8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1],
-      [10, 1, 0, 10, 0, 6, 6, 0, 4],
-      [4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3],
-      [10, 9, 4, 6, 10, 4],
-      [4, 9, 5, 7, 6, 11],
-      [0, 8, 3, 4, 9, 5, 11, 7, 6],
-      [5, 0, 1, 5, 4, 0, 7, 6, 11],
-      [11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5],
-      [9, 5, 4, 10, 1, 2, 7, 6, 11],
-      [6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5],
-      [7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2],
-      [3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6],
-      [7, 2, 3, 7, 6, 2, 5, 4, 9],
-      [9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7],
-      [3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0],
-      [6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8],
-      [9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7],
-      [1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4],
-      [4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10],
-      [7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10],
-      [6, 9, 5, 6, 11, 9, 11, 8, 9],
-      [3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5],
-      [0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11],
-      [6, 11, 3, 6, 3, 5, 5, 3, 1],
-      [1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6],
-      [0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10],
-      [11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5],
-      [6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3],
-      [5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2],
-      [9, 5, 6, 9, 6, 0, 0, 6, 2],
-      [1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8],
-      [1, 5, 6, 2, 1, 6],
-      [1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6],
-      [10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0],
-      [0, 3, 8, 5, 6, 10],
-      [10, 5, 6],
-      [11, 5, 10, 7, 5, 11],
-      [11, 5, 10, 11, 7, 5, 8, 3, 0],
-      [5, 11, 7, 5, 10, 11, 1, 9, 0],
-      [10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1],
-      [11, 1, 2, 11, 7, 1, 7, 5, 1],
-      [0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11],
-      [9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7],
-      [7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2],
-      [2, 5, 10, 2, 3, 5, 3, 7, 5],
-      [8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5],
-      [9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2],
-      [9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2],
-      [1, 3, 5, 3, 7, 5],
-      [0, 8, 7, 0, 7, 1, 1, 7, 5],
-      [9, 0, 3, 9, 3, 5, 5, 3, 7],
-      [9, 8, 7, 5, 9, 7],
-      [5, 8, 4, 5, 10, 8, 10, 11, 8],
-      [5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0],
-      [0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5],
-      [10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4],
-      [2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8],
-      [0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11],
-      [0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5],
-      [9, 4, 5, 2, 11, 3],
-      [2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4],
-      [5, 10, 2, 5, 2, 4, 4, 2, 0],
-      [3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9],
-      [5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2],
-      [8, 4, 5, 8, 5, 3, 3, 5, 1],
-      [0, 4, 5, 1, 0, 5],
-      [8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5],
-      [9, 4, 5],
-      [4, 11, 7, 4, 9, 11, 9, 10, 11],
-      [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11],
-      [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11],
-      [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4],
-      [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2],
-      [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3],
-      [11, 7, 4, 11, 4, 2, 2, 4, 0],
-      [11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4],
-      [2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9],
-      [9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7],
-      [3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10],
-      [1, 10, 2, 8, 7, 4],
-      [4, 9, 1, 4, 1, 7, 7, 1, 3],
-      [4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1],
-      [4, 0, 3, 7, 4, 3],
-      [4, 8, 7],
-      [9, 10, 8, 10, 11, 8],
-      [3, 0, 9, 3, 9, 11, 11, 9, 10],
-      [0, 1, 10, 0, 10, 8, 8, 10, 11],
-      [3, 1, 10, 11, 3, 10],
-      [1, 2, 11, 1, 11, 9, 9, 11, 8],
-      [3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9],
-      [0, 2, 11, 8, 0, 11],
-      [3, 2, 11],
-      [2, 3, 8, 2, 8, 10, 10, 8, 9],
-      [9, 10, 2, 0, 9, 2],
-      [2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8],
-      [1, 10, 2],
-      [1, 3, 8, 9, 1, 8],
-      [0, 9, 1],
-      [0, 3, 8],
-      []]
-  , cubeVerts = [
-     [0,0,0]
-    ,[1,0,0]
-    ,[1,1,0]
-    ,[0,1,0]
-    ,[0,0,1]
-    ,[1,0,1]
-    ,[1,1,1]
-    ,[0,1,1]]
-  , edgeIndex = [ [0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7] ];
-
-
-
-exports.marchingCubes = function(dims, potential, bounds) {
-  if(!bounds) {
-    bounds = [[0,0,0], dims];
-  }
-  var scale     = [0,0,0];
-  var shift     = [0,0,0];
-  for(var i=0; i<3; ++i) {
-    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
-    shift[i] = bounds[0][i];
-  }
-
-  var vertices = []
-    , faces = []
-    , n = 0
-    , grid = new Array(8)
-    , edges = new Array(12)
-    , x = [0,0,0];
-  //March over the volume
-  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0])
-  for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n)
-  for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n) {
-    //For each cell, compute cube mask
-    var cube_index = 0;
-    for(var i=0; i<8; ++i) {
-      var v = cubeVerts[i]
-        , s = potential(
-          scale[0]*(x[0]+v[0])+shift[0],
-          scale[1]*(x[1]+v[1])+shift[1],
-          scale[2]*(x[2]+v[2])+shift[2]);
-      grid[i] = s;
-      cube_index |= (s > 0) ? 1 << i : 0;
-    }
-    //Compute vertices
-    var edge_mask = edgeTable[cube_index];
-    if(edge_mask === 0) {
-      continue;
-    }
-    for(var i=0; i<12; ++i) {
-      if((edge_mask & (1<<i)) === 0) {
-        continue;
-      }
-      edges[i] = vertices.length;
-      var nv = [0,0,0]
-        , e = edgeIndex[i]
-        , p0 = cubeVerts[e[0]]
-        , p1 = cubeVerts[e[1]]
-        , a = grid[e[0]]
-        , b = grid[e[1]]
-        , d = a - b
-        , t = 0;
-      if(Math.abs(d) > 1e-6) {
-        t = a / d;
-      }
-      for(var j=0; j<3; ++j) {
-        nv[j] = scale[j] * ((x[j] + p0[j]) + t * (p1[j] - p0[j])) + shift[j];
-      }
-      vertices.push(nv);
-    }
-    //Add faces
-    var f = triTable[cube_index];
-    for(var i=0; i<f.length; i += 3) {
-      faces.push([edges[f[i]], edges[f[i+1]], edges[f[i+2]]]);
-    }
-  }
-  return { positions: vertices, cells: faces };
-};
-
-
-},{}],14:[function(require,module,exports){
-// GLOW.js r1.1 - http://github.com/empaempa/GLOW
-window.GLOW=function(){function b(a,c,b){this.flags=a;this.callback=c;this.context=b}var a={},c={},f=-1,e=[];b.prototype.dispatch=function(a,c){this.flags===a&&(this.context?this.callback.call(this.context,c):this.callback(c))};a.LOGS=1;a.WARNINGS=2;a.ERRORS=4;a.logFlags=a.ERRORS;a.currentContext={};a.registerContext=function(b){c[b.id]=b;a.enableContext(b)};a.getContextById=function(b){if(c[b])return c[b];GLOW.error("Couldn't find context id "+b+", returning current with id "+a.currentContext.id);return a.currentContext};
-a.enableContext=function(c){a.currentContext=typeof c==="string"?getContextById(c):c;GL=a.GL=a.currentContext.GL};a.uniqueId=function(){return++f};a.log=function(c){a.logFlags&a.LOGS&&console.log(c);a.dispatch(a.LOGS,c)};a.warn=function(c){a.logFlags&a.WARNINGS&&console.warn(c);a.dispatch(a.WARNINGS,c)};a.error=function(c){a.logFlags&a.ERRORS&&console.error(c);a.dispatch(a.ERRORS,c)};a.addEventListener=function(a,c,f){e.push(new b(a,c,f));return e[e.length-1]};a.removeEventListener=function(c){c=
-e.indexOf(c);c!==-1?e.splice(c,1):a.warn("GLOW.removeEventListener: Couldn't find listener object")};a.dispatch=function(a,c){for(var b=e.length;b--;)e[b].dispatch(a,c)};return a}(),GL={};
-GLOW.Context=function(){function b(a){a===void 0&&(a={});this.id=a.id!==void 0?a.id:GLOW.uniqueId();this.alpha=a.alpha!==void 0?a.alpha:!0;this.depth=a.depth!==void 0?a.depth:!0;this.antialias=a.antialias!==void 0?a.antialias:!0;this.stencil=a.stencil!==void 0?a.stencil:!1;this.premultipliedAlpha=a.premultipliedAlpha!==void 0?a.premultipliedAlpha:!0;this.preserveDrawingBuffer=a.preserveDrawingBuffer!==void 0?a.preserveDrawingBuffer:!1;this.width=a.width!==void 0?a.width:window.innerWidth;this.height=
-a.height!==void 0?a.height:window.innerHeight;this.cache=new GLOW.Cache;this.debug=a.debug!==void 0?a.debug:!1;if(a.context)this.GL=a.context,GLOW.registerContext(this);else{try{this.domElement=document.createElement("canvas");if(this.debug&&window.WebGLDebugUtils)this.domElement=WebGLDebugUtils.makeLostContextSimulatingCanvas(this.domElement);this.GL=this.domElement.getContext("experimental-webgl",{alpha:this.alpha,depth:this.depth,antialias:this.antialias,stencil:this.stencil,premultipliedAlpha:this.premultipliedAlpha,
-preserveDrawingBuffer:this.preserveDrawingBuffer})}catch(c){GLOW.error("GLOW.Context.construct: "+c)}if(this.GL!==null){GLOW.registerContext(this);this.domElement.width=this.width;this.domElement.height=this.height;this.viewport=a.viewport?{x:a.viewport.x!==void 0?a.viewport.x:0,y:a.viewport.y!==void 0?a.viewport.y:0,width:a.viewport.width!==void 0?a.viewport.width:this.width,height:a.viewport.height!==void 0?a.viewport.height:this.height}:{x:0,y:0,width:this.width,height:this.height};if(a.clear){if(this.clearSettings=
-{r:a.clear.red!==void 0?a.clear.red:0,g:a.clear.green!==void 0?a.clear.green:0,b:a.clear.blue!==void 0?a.clear.blue:0,a:a.clear.alpha!==void 0?a.clear.alpha:1,depth:a.clear.depth!==void 0?a.clear.depth:1,bits:a.clear.bits!==void 0?a.clear.bits:-1},this.clearSettings.bits===-1)this.clearSettings.bits=GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0}else this.clearSettings={r:0,g:0,b:0,a:1,depth:1,bits:0},this.clearSettings.bits=
-GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0;this.enableCulling(!0,{frontFace:GL.CCW,cullFace:GL.BACK});this.enableDepthTest(!0,{func:GL.LEQUAL,write:!0,zNear:0,zFar:1});this.enableBlend(!1);this.setViewport();this.clear()}else GLOW.error("GLOW.Context.construct: unable to initialize WebGL")}}b.prototype.setupClear=function(a){if(a!==void 0)this.clearSettings.r=a.red!==void 0?Math.min(1,Math.max(0,a.red)):
-this.clearSettings.r,this.clearSettings.g=a.green!==void 0?Math.min(1,Math.max(0,a.green)):this.clearSettings.g,this.clearSettings.b=a.blue!==void 0?Math.min(1,Math.max(0,a.blue)):this.clearSettings.b,this.clearSettings.a=a.alpha!==void 0?Math.min(1,Math.max(0,a.alpha)):this.clearSettings.a,this.clearSettings.depth=a.depth!==void 0?Math.min(1,Math.max(0,a.depth)):this.clearSettings.depth,this.clearSettings.bits=a.bits!==void 0?a.bits:this.clearSettings.bits;GL.clearColor(this.clearSettings.r,this.clearSettings.g,
-this.clearSettings.b,this.clearSettings.a);GL.clearDepth(this.clearSettings.depth);return this};b.prototype.clear=function(a){this.setupClear(a);GL.clear(this.clearSettings.bits);return this};b.prototype.enableBlend=function(a,c){a?(GL.enable(GL.BLEND),c&&this.setupBlend(c)):GL.disable(GL.BLEND);return this};b.prototype.setupBlend=function(a){a.equationRGB?(a.equationAlpha&&GL.blendEquationSeparate(a.equationRGB,a.equationAlpha),a.srcRGB&&GL.blendFuncSeparate(a.srcRGB,a.dstRGB,a.srcAlpha,a.dstAlpha)):
-(a.equation&&GL.blendEquation(a.equation),a.src&&GL.blendFunc(a.src,a.dst));return this};b.prototype.enableDepthTest=function(a,c){a?(GL.enable(GL.DEPTH_TEST),c&&this.setupDepthTest(c)):GL.disable(GL.DEPTH_TEST);return this};b.prototype.setupDepthTest=function(a){a.func!==void 0&&GL.depthFunc(a.func);a.write!==void 0&&GL.depthMask(a.write);a.zNear!==void 0&&a.zFar!==void 0&&a.zNear<=a.zFar&&GL.depthRange(Math.max(0,Math.min(1,a.zNear)),Math.max(0,Math.min(1,a.zFar)));return this};b.prototype.enablePolygonOffset=
-function(a,c){a?(GL.enable(GL.POLYGON_OFFSET_FILL),c&&this.setupPolygonOffset(c)):GL.disable(GL.POLYGON_OFFSET_FILL);return this};b.prototype.setupPolygonOffset=function(a){a.factor&&a.units&&GL.polygonOffset(a.factor,a.units)};b.prototype.enableStencilTest=function(a,c){a?(GL.enable(GL.STENCIL_TEST),c&&this.setupStencilTest(c)):GL.disable(GL.STENCIL_TEST);return this};b.prototype.setupStencilTest=function(a){a.func&&a.funcFace?GL.stencilFuncSeparate(a.funcFace,a.func,a.funcRef,a.funcMask):a.func&&
-GL.stencilFunc(a.func,a.funcRef,a.funcMask);a.mask&&a.maskFace?GL.stencilMaskSeparate(a.maskFace,a.mask):a.mask&&GL.stencilMask(a.mask);a.opFail&&a.opFace?GL.stencilOpSeparate(a.opFace,a.opFail,a.opZfail,a.opZpass):a.opFail&&GL.stencilOp(a.opFail,a.opZfail,a.opZpass);return this};b.prototype.enableCulling=function(a,c){a?(GL.enable(GL.CULL_FACE),c&&this.setupCulling(c)):GL.disable(GL.CULL_FACE);return this};b.prototype.setupCulling=function(a){try{a.frontFace&&GL.frontFace(a.frontFace),a.cullFace&&
-GL.cullFace(a.cullFace)}catch(c){GLOW.error("GLOW.Context.setupCulling: "+c)}return this};b.prototype.enableScissor=function(a,c){a?(GL.enable(GL.SCISSOR_TEST),c&&this.setupScissor(c)):GL.disable(GL.SCISSOR_TEST);return this};b.prototype.setupScissor=function(a){try{GL.scissor(a.x,a.y,a.width,a.height)}catch(c){GLOW.error("GLOW.Context.setupScissorTest: "+c)}return this};b.prototype.setViewport=function(){this.setupViewport()};b.prototype.setupViewport=function(a){if(a)this.viewport.x=a.x!==void 0?
-a.x:this.viewport.x,this.viewport.y=a.y!==void 0?a.y:this.viewport.y,this.viewport.width=a.width!==void 0?a.width:this.viewport.width,this.viewport.height=a.height!==void 0?a.height:this.viewport.height;GL.viewport(this.viewport.x,this.viewport.y,this.viewport.width,this.viewport.height);return this};b.prototype.availableExtensions=function(){return GL.getSupportedExtensions()};b.prototype.enableExtension=function(a){for(var c=GL.getSupportedExtensions(),b=0,e=c.length;b<e;b++)if(a.toLowerCase()===
-c[b].toLowerCase())break;if(b!==e)return GL.getExtension(c[b])};b.prototype.getParameter=function(a){return GL.getParameter(a)};b.prototype.maxVertexTextureImageUnits=function(){return this.getParameter(GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS)};b.prototype.resize=function(a,c){var b=c/this.height;this.viewport.width*=a/this.width;this.viewport.height*=b;this.domElement.width=this.width=a;this.domElement.height=this.height=c};return b}();
-GLOW.Compiler=function(){var b={};b.compile=function(a){var c=GLOW.currentContext.cache.codeCompiled(a.vertexShader,a.fragmentShader);c===void 0&&(c=b.linkProgram(b.compileVertexShader(a.vertexShader),b.compileFragmentShader(a.fragmentShader)),GLOW.currentContext.cache.addCompiledProgram(c));var f=b.createUniforms(b.extractUniforms(c),a.data),e=b.createAttributes(b.extractAttributes(c),a.data,a.usage,a.interleave),g=b.interleaveAttributes(e,a.interleave);if(a.elements)GLOW.error("GLOW.Compiler.compile: .elements is no longer supported, please use .indices combined with .primitives");
-else{var h=a.indices,i=a.primitives!==void 0?a.primitives:GL.TRIANGLES,j=a.usage!==void 0?a.usage:{},k=j.primitives;if(a.triangles)h=a.triangles,k=j.triangles;else if(a.triangleStrip)h=a.triangleStrip,i=GL.TRIANGLE_STRIP,k=j.triangleStrip;else if(a.triangleFan)h=a.triangleFan,i=GL.TRIANGLE_FAN,k=j.triangleFan;else if(a.points)h=a.points,i=GL.POINTS,k=j.points;else if(a.lines)h=a.lines,i=GL.LINES,k=j.lines;else if(a.lineLoop)h=a.lineLoop,i=GL.LINE_LOOP,k=j.lineLoop;else if(a.lineStrip)h=a.lineStrip,
-i=GL.LINE_STRIP,k=j.lineStrip;if(h===void 0){for(var l in e)if(e[l].data){h=e[l].data.length/e[l].size;break}if(h===void 0)for(var m in g){for(l in g[m].attributes){h=g[m].attributes[l].data.length/g[m].attributes[l].size;break}break}h===void 0&&(h=0)}h=b.createElements(h,i,k);return new GLOW.CompiledData(c,f,e,g,h,a)}};b.compileVertexShader=function(a){var c;c=GL.createShader(GL.VERTEX_SHADER);c.id=GLOW.uniqueId();GL.shaderSource(c,a);GL.compileShader(c);!GL.getShaderParameter(c,GL.COMPILE_STATUS)&&
-!GL.isContextLost()&&GLOW.error("GLOW.Compiler.compileVertexShader: "+GL.getShaderInfoLog(c));return c};b.compileFragmentShader=function(a){var c;c=GL.createShader(GL.FRAGMENT_SHADER);c.id=GLOW.uniqueId();GL.shaderSource(c,a);GL.compileShader(c);!GL.getShaderParameter(c,GL.COMPILE_STATUS)&&!GL.isContextLost()&&GLOW.error("GLOW.Compiler.compileFragmentShader: "+GL.getShaderInfoLog(c));return c};b.linkProgram=function(a,c){var b=GL.createProgram();b||GLOW.error("GLOW.Compiler.linkProgram: Could not create program");
-b.id=GLOW.uniqueId();GL.attachShader(b,a);GL.attachShader(b,c);GL.linkProgram(b);!GL.getProgramParameter(b,GL.LINK_STATUS)&&!GL.isContextLost()&&GLOW.error("GLOW.Compiler.linkProgram: Could not initialise program");return b};b.extractUniforms=function(a){for(var c={},b,e=0,g=GL.getProgramParameter(a,GL.ACTIVE_UNIFORMS);e<g;e++)if(b=GL.getActiveUniform(a,e),b!==null&&b!==-1&&b!==void 0)b={name:b.name.split("[")[0],size:b.size,type:b.type,location:GL.getUniformLocation(a,b.name.split("[")[0]),locationNumber:e},
-c[b.name]=b;else break;return c};b.extractAttributes=function(a){for(var c={},b,e=0,g=GL.getProgramParameter(a,GL.ACTIVE_ATTRIBUTES);e<g;e++)if(b=GL.getActiveAttrib(a,e),b!==null&&b!==-1&&b!==void 0)b={name:b.name,size:b.size,type:b.type,location:GL.getAttribLocation(a,b.name),locationNumber:e},c[b.name]=b;else break;a.highestAttributeNumber=e-1;return c};b.createUniforms=function(a,c){var b,e={},g,h,i=0;for(b in a)if(g=a[b],h=g.name,c[h]instanceof GLOW.Uniform)e[h]=c[h];else if(c[h]===void 0&&GLOW.warn("GLOW.Compiler.createUniforms: missing data for uniform "+
-h+". Creating anyway, but make sure to set data before drawing."),e[h]=new GLOW.Uniform(g,c[h]),e[h].type===GL.SAMPLER_2D||e[h].type===GL.SAMPLER_CUBE)e[h].textureUnit=i++,e[h].data!==void 0&&e[h].data.init();return e};b.createAttributes=function(a,c,b,e){var g,h,i,j={},e=e!==void 0?e:{},b=b!==void 0?b:{};for(g in a)h=a[g],i=h.name,c[i]instanceof GLOW.Attribute?j[i]=c[i]:(c[i]===void 0&&GLOW.warn("GLOW.Compiler.createAttributes: missing data for attribute "+i+". Creating anyway, but make sure to set data before drawing."),
-j[i]=new GLOW.Attribute(h,c[i],b[i],e[i]!==void 0?e[i]:!0));return j};b.interleaveAttributes=function(a,c){var c=c!==void 0?c:{},b,e,g,h,i;g=0;var j=[];e=0;for(b in a)e++;if(e===1)for(b in a){if(a[b].interleaved===!0)a[b].interleaved=!1,a[b].data&&a[b].bufferData()}else{for(b in a)c[b]!==void 0&&c[b]!==!1&&(g=Math.max(g-1,c[b])+1);for(b in a)c[b]===void 0&&(c[b]=g);for(i in c)c[i]!==!1&&(j[c[i]]===void 0&&(j[c[i]]=[]),j[c[i]].push(a[i]));var k,l;b=0;for(e=j.length;b<e;b++)if(j[b]!==void 0){g=k=0;
-for(h=j[b].length;g<h;g++)if(k+j[b][g].size*4>255){GLOW.warn("GLOW.Compiler.interleaveAttributes: Stride owerflow, moving attributes to new interleave index. Please check your interleave setup!");l=j.length;for(j[l]=[];g<h;)j[l].push(j[b][g]),j[b].splice(g,1),h--}else k+=j[b][g].size*4}l={};b=0;for(e=j.length;b<e;b++)if(j[b]!==void 0){k="";g=0;for(h=j[b].length;g<h;g++)k+=g!==h-1?j[b][g].name+"_":j[b][g].name;l[k]=new GLOW.InterleavedAttributes(j[b])}for(i in c)c[i]!==!1&&delete a[i];return l}};b.createElements=
-function(a,c,b){return a instanceof GLOW.Elements?a:new GLOW.Elements(a,c,b)};return b}();
-GLOW.CompiledData=function(){function b(a,c,b,e,g){this.program=a;this.uniforms=c||{};this.attributes=b||{};this.interleavedAttributes=e||{};this.elements=g;this.interleavedAttributeArray=this.attributeArray=this.uniformArray=void 0;this.createArrays()}b.prototype.createArrays=function(){this.uniformArray=[];this.attributeArray=[];this.interleavedAttributeArray=[];var a,c,b;for(a in this.uniforms)this.uniformArray.push(this.uniforms[a]);for(c in this.attributes)this.attributeArray.push(this.attributes[c]);
-for(b in this.interleavedAttributes)this.interleavedAttributeArray.push(this.interleavedAttributes[b])};b.prototype.clone=function(a){var c=new GLOW.CompiledData,a=a||{},b;for(b in this.uniforms)if(a[b])if(a[b]instanceof GLOW.Uniform)c.uniforms[b]=execept[b];else{if(c.uniforms[b]=new GLOW.Uniform(this.uniforms[b],a[b]),c.uniforms[b].type===GL.SAMPLER_2D||c.uniforms[b].type===GL.SAMPLER_CUBE)c.uniforms[b].textureUnit=this.uniforms[b].textureUnit,c.uniforms[b].data&&c.uniforms[b].data.init()}else c.uniforms[b]=
-this.uniforms[b];for(var e in this.attributes)c.attributes[e]=a[e]?a[e]instanceof GLOW.Attribute?a[e]:new GLOW.Attribute(this.attributes[e],a[e]):this.attributes[e];for(var g in this.interleavedAttributes)c.interleavedAttributes[g]=a[g]?a[g]:this.interleavedAttributes[g];c.elements=a.indices?new GLOW.Elements(a.indices,a.primitives):a.elements instanceof GLOW.Elements?a.elements:this.elements;c.program=a.program?a.program:this.program;c.createArrays();return c};b.prototype.dispose=function(a,c){if(a){var b;
-for(b=this.uniformArray.length;b--;)this.uniformArray[b].dispose();for(b=this.attributeArray.length;b--;)this.attributeArray[b].dispose();for(b=this.interleavedAttributeArray.length;b--;)this.interleavedAttributeArray[b].dispose();this.elements.dispose()}if(c&&GL.isProgram(this.program)&&(b=GL.getAttachedShaders(this.program))){for(var e=b.length;e--;)GL.detachShader(this.program,b[e]),GL.deleteShader(b[e]);GL.deleteProgram(this.program)}delete this.program;delete this.uniforms;delete this.attributes;
-delete this.interleavedAttributes;delete this.elements;delete this.uniformArray;delete this.attributeArray;delete this.interleavedAttributeArray};return b}();
-GLOW.Cache=function(){function b(){this.highestAttributeNumber=-1;this.uniformByLocation=[];this.attributeByLocation=[];this.textureByLocation=[];this.compiledCode=[];this.programId=this.elementId=-1;this.active=!0}b.prototype.codeCompiled=function(a,c){var b,e,g=this.compiledCode.length;for(e=0;e<g;e++)if(b=this.compiledCode[e],a===b.vertexShader&&c===b.fragmentShader)break;if(e===g)this.compiledCode.push({vertexShader:a,fragmentShader:c});else return this.compiledCode[e].program};b.prototype.addCompiledProgram=
-function(a){this.compiledCode[this.compiledCode.length-1].program=a};b.prototype.programCached=function(a){if(this.active){if(a.id===this.programId)return!0;this.programId=a.id;this.uniformByLocation.length=0;this.attributeByLocation.length=0;this.textureByLocation.length=0;this.elementId=-1}return!1};b.prototype.setProgramHighestAttributeNumber=function(a){var c=this.highestAttributeNumber;this.highestAttributeNumber=a.highestAttributeNumber;return a.highestAttributeNumber-c};b.prototype.uniformCached=
-function(a){if(this.active){if(this.uniformByLocation[a.locationNumber]===a.id)return!0;this.uniformByLocation[a.locationNumber]=a.id}return!1};b.prototype.invalidateUniform=function(a){this.uniformByLocation[a.locationNumber]=void 0};b.prototype.attributeCached=function(a){if(this.active){if(this.attributeByLocation[a.locationNumber]===a.id)return!0;this.attributeByLocation[a.locationNumber]=a.id}return!1};b.prototype.interleavedAttributeCached=function(a){if(this.active)for(var c=0,b=a.attributes.length,
-e;c<b;c++){e=a.attributes[c];if(this.attributeByLocation[e.locationNumber]===e.id)return!0;this.attributeByLocation[e.locationNumber]=e.id}return!1};b.prototype.invalidateAttribute=function(a){this.attributeByLocation[a.locationNumber]=void 0};b.prototype.textureCached=function(a,c){if(this.active){if(this.textureByLocation[a]===c.id)return!0;this.textureByLocation[a]=c.id}return!1};b.prototype.invalidateTexture=function(a){this.textureByLocation[a]=void 0};b.prototype.elementsCached=function(a){if(this.active){if(a.id===
-this.elementId)return!0;this.elementId=a.id}return!1};b.prototype.invalidateElements=function(){this.elementId=-1};b.prototype.clear=function(){this.highestAttributeNumber=-1;this.uniformByLocation.length=0;this.attributeByLocation.length=0;this.textureByLocation.length=0;this.programId=this.elementId=-1};return b}();
-GLOW.FBO=function(){function b(a){a=a!==void 0?a:{};this.id=GLOW.uniqueId();this.width=a.width||a.size||window.innerWidth;this.height=a.height||a.size||window.innerHeight;this.wrapS=a.wrapS||a.wrap||GL.CLAMP_TO_EDGE;this.wrapT=a.wrapT||a.wrap||GL.CLAMP_TO_EDGE;this.magFilter=a.magFilter||a.filter||GL.LINEAR;this.minFilter=a.minFilter||a.filter||GL.LINEAR;this.internalFormat=a.internalFormat||GL.RGBA;this.format=a.format||GL.RGBA;this.type=a.type||GL.UNSIGNED_BYTE;this.depth=a.depth!==void 0?a.depth:
-!0;this.stencil=a.stencil!==void 0?a.stencil:!1;this.data=a.data||null;this.isBound=!1;this.textureUnit=-1;this.textureType=a.cube!==!0?GL.TEXTURE_2D:GL.TEXTURE_CUBE_MAP;this.viewport=a.viewport?{x:a.viewport.x!==void 0?a.viewport.x:0,y:a.viewport.y!==void 0?a.viewport.y:0,width:a.viewport.width!==void 0?a.viewport.width:this.width,height:a.viewport.height!==void 0?a.viewport.height:this.height}:{x:0,y:0,width:this.width,height:this.height};if(a.clear){if(this.clearSettings={r:a.clear.red!==void 0?
-a.clear.red:0,g:a.clear.green!==void 0?a.clear.green:0,b:a.clear.blue!==void 0?a.clear.blue:0,a:a.clear.alpha!==void 0?a.clear.alpha:1,depth:a.clear.depth!==void 0?a.clear.depth:1,bits:a.clear.bits!==void 0?a.clear.bits:-1},this.clearSettings.bits===-1)this.clearSettings.bits=GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0}else this.clearSettings={r:0,g:0,b:0,a:1,depth:1,bits:0},this.clearSettings.bits=GL.COLOR_BUFFER_BIT,
-this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0;this.createBuffers()}var a={posX:0,negX:1,posY:2,negY:3,posZ:4,negZ:5};b.prototype.createBuffers=function(){this.texture=GL.createTexture();var c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL)GLOW.error("GLOW.FBO.createBuffers: Error creating render texture.");else{GL.bindTexture(this.textureType,this.texture);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_S,this.wrapS);
-GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_T,this.wrapT);GL.texParameteri(this.textureType,GL.TEXTURE_MAG_FILTER,this.magFilter);GL.texParameteri(this.textureType,GL.TEXTURE_MIN_FILTER,this.minFilter);if(this.textureType===GL.TEXTURE_2D)this.data===null||this.data instanceof Uint8Array||this.data instanceof Float32Array?GL.texImage2D(this.textureType,0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data):GL.texImage2D(this.textureType,0,this.internalFormat,this.format,
-this.type,this.data);else for(var b in a)GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[b],0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data[b]);if(this.depth||this.stencil){this.renderBuffer=GL.createRenderbuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating render buffer.");return}GL.bindRenderbuffer(GL.RENDERBUFFER,this.renderBuffer);this.depth&&!this.stencil?GL.renderbufferStorage(GL.RENDERBUFFER,
-GL.DEPTH_COMPONENT16,this.width,this.height):!this.depth&&this.stencil?GL.renderbufferStorage(GL.RENDERBUFFER,GL.STENCIL_INDEX8,this.width,this.height):this.depth&&this.stencil&&GL.renderbufferStorage(GL.RENDERBUFFER,GL.DEPTH_STENCIL,this.width,this.height)}if(this.textureType===GL.TEXTURE_2D){this.frameBuffer=GL.createFramebuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating frame buffer.");return}GL.bindFramebuffer(GL.FRAMEBUFFER,
-this.frameBuffer);GL.framebufferTexture2D(GL.FRAMEBUFFER,GL.COLOR_ATTACHMENT0,GL.TEXTURE_2D,this.texture,0);this.depth&&!this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):!this.depth&&this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):this.depth&&this.stencil&&GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer)}else{this.frameBuffers=
-{};for(var e in a){this.frameBuffers[e]=GL.createFramebuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating frame buffer for side "+e);return}GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffers[e]);GL.framebufferTexture2D(GL.FRAMEBUFFER,GL.COLOR_ATTACHMENT0,GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[e],this.texture,0);this.depth&&!this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):
-!this.depth&&this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):this.depth&&this.stencil&&GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer)}}GL.bindTexture(this.textureType,null);GL.bindRenderbuffer(GL.RENDERBUFFER,null);GL.bindFramebuffer(GL.FRAMEBUFFER,null)}};b.prototype.deleteBuffers=function(){this.texture&&GL.deleteTexture(this.texture);this.renderBuffer&&GL.deleteRenderbuffer(this.renderBuffer);
-if(this.textureType===GL.TEXTURE_2D)this.frameBuffer&&GL.deleteFramebuffer(this.frameBuffer);else for(var c in a)GL.deleteFramebuffer(this.frameBuffers[c])};b.prototype.init=function(){};b.prototype.bind=function(a,b){if(!this.isBound)this.isBound=!0,(a||a===void 0)&&this.setupViewport(a),this.textureType===GL.TEXTURE_2D?GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffer):GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffers[b!==void 0?b:"posX"]);return this};b.prototype.unbind=function(a){if(this.isBound)this.isBound=
-!1,GL.bindFramebuffer(GL.FRAMEBUFFER,null),(a===void 0||a===!0)&&GL.viewport(GLOW.currentContext.viewport.x,GLOW.currentContext.viewport.y,GLOW.currentContext.viewport.width,GLOW.currentContext.viewport.height);return this};b.prototype.setViewport=function(){this.setupViewport()};b.prototype.setupViewport=function(a){if(a)this.viewport.x=a.x!==void 0?a.x:this.viewport.x,this.viewport.y=a.y!==void 0?a.y:this.viewport.y,this.viewport.width=a.width!==void 0?a.width:this.viewport.width,this.viewport.height=
-a.height!==void 0?a.height:this.viewport.height;GL.viewport(this.viewport.x,this.viewport.y,this.viewport.width,this.viewport.height);return this};b.prototype.setupClear=function(a){if(a!==void 0)this.clearSettings.r=a.red!==void 0?Math.min(1,Math.max(0,a.red)):this.clearSettings.r,this.clearSettings.g=a.green!==void 0?Math.min(1,Math.max(0,a.green)):this.clearSettings.g,this.clearSettings.b=a.blue!==void 0?Math.min(1,Math.max(0,a.blue)):this.clearSettings.b,this.clearSettings.a=a.alpha!==void 0?
-Math.min(1,Math.max(0,a.alpha)):this.clearSettings.a,this.clearSettings.depth=a.depth!==void 0?Math.min(1,Math.max(0,a.depth)):this.clearSettings.depth,this.clearSettings.bits=a.bits!==void 0?a.bits:this.clearSettings.bits;GL.clearColor(this.clearSettings.r,this.clearSettings.g,this.clearSettings.b,this.clearSettings.a);GL.clearDepth(this.clearSettings.depth);return this};b.prototype.clear=function(a){this.isBound&&(this.setupClear(a),GL.clear(this.clearSettings.bits));return this};b.prototype.resize=
-function(a,b){var e=b/this.height;this.viewport.width*=a/this.width;this.viewport.height*=e;this.width=a;this.height=b;this.deleteBuffers();this.createBuffers();return this};b.prototype.generateMipMaps=function(){GL.bindTexture(this.textureType,this.texture);GL.generateMipmap(this.textureType);GL.bindTexture(this.textureType,null);return this};b.prototype.dispose=function(){this.deleteBuffers();delete this.data;delete this.viewport;delete this.texture;delete this.renderBuffer;delete this.frameBuffer;
-delete this.frameBuffers;delete this.viewport;delete this.clearSettings};return b}();
-GLOW.Texture=function(){function b(a){if(a.url!==void 0)a.data=a.url;this.id=GLOW.uniqueId();this.data=a.data;this.autoUpdate=a.autoUpdate;this.internalFormat=a.internalFormat||GL.RGBA;this.format=a.format||GL.RGBA;this.type=a.type||GL.UNSIGNED_BYTE;this.wrapS=a.wrapS||a.wrap||GL.REPEAT;this.wrapT=a.wrapT||a.wrap||GL.REPEAT;this.magFilter=a.magFilter||a.filter||GL.LINEAR;this.minFilter=a.minFilter||a.filter||GL.LINEAR_MIPMAP_LINEAR;this.width=a.width;this.height=a.height;this.onLoadComplete=a.onLoadComplete;
-this.onLoadContext=a.onLoadContext;this.texture=void 0}var a={posX:0,negX:1,posY:2,negY:3,posZ:4,negZ:5};b.prototype.init=function(){if(this.texture!==void 0)return this;if(this.data===void 0&&this.width!==void 0&&this.height!==void 0)this.data=this.type===GL.UNSIGNED_BYTE?new Uint8Array(this.width*this.height*(this.format===GL.RGBA?4:3)):new Float32Array(this.width*this.height*(this.format===GL.RGBA?4:3));else if(typeof this.data==="string"){this.textureType=GL.TEXTURE_2D;var b=this.data,f=b.toLowerCase();
-if(f.indexOf(".jpg")!==-1||f.indexOf(".png")!==-1||f.indexOf(".gif")!==-1||f.indexOf("jpeg")!==-1)this.data=new Image,this.data.scope=this,this.data.onload=this.onLoadImage;else{if(this.autoUpdate===void 0)this.autoUpdate=!0;this.data=document.createElement("video");this.data.scope=this;this.data.addEventListener("loadeddata",this.onLoadVideo,!1)}this.data.src=b}else if(this.data instanceof HTMLImageElement||this.data instanceof HTMLVideoElement||this.data instanceof HTMLCanvasElement||this.data instanceof
-Uint8Array||this.data instanceof Float32Array)this.textureType=GL.TEXTURE_2D,this.createTexture();else{this.textureType=GL.TEXTURE_CUBE_MAP;this.itemsToLoad=0;for(var e in a)this.data[e]!==void 0?typeof this.data[e]==="string"&&this.itemsToLoad++:GLOW.error("GLOW.Texture.init: data type error. Did you forget cube map "+e+"? If not, the data type is not supported");if(this.itemsToLoad===0)this.createTexture();else for(e in a)if(typeof this.data[e]==="string")b=this.data[e],f=b.toLowerCase(),f.indexOf(".jpg")!==
--1||f.indexOf(".png")!==-1||f.indexOf(".gif")!==-1||f.indexOf("jpeg")!==-1?(this.data[e]=new Image,this.data[e].scope=this,this.data[e].onload=this.onLoadCubeImage):(this.autoUpdate!==void 0?this.autoUpdate[e]=this.autoUpdate[e]!==void 0?this.autoUpdate[e]:!0:(this.autoUpdate={},this.autoUpdate[e]=!0),this.data[e]=document.createElement("video"),this.data[e].scope=this,this.data[e].addEventListener("loadeddata",this.onLoadCubeVideo,!1)),this.data[e].src=b}return this};b.prototype.createTexture=function(){this.texture!==
-void 0&&GL.deleteTexture(this.texture);this.texture=GL.createTexture();GL.bindTexture(this.textureType,this.texture);if(this.textureType===GL.TEXTURE_2D)if(this.data instanceof Uint8Array)if(this.width!==void 0&&this.height!==void 0)GL.texImage2D(this.textureType,0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data);else{GLOW.error("GLOW.Texture.createTexture: Textures of type Uint8Array requires width and height parameters. Quitting.");return}else GL.texImage2D(this.textureType,
-0,this.internalFormat,this.format,this.type,this.data);else for(var b in a)if(this.data[b]instanceof Uint8Array||this.data[b]instanceof Float32Array)if(this.width!==void 0&&this.height!==void 0)GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[b],0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data[b]);else{GLOW.error("GLOW.Texture.createTexture: Textures of type Uint8Array/Float32Array requires width and height parameters. Quitting.");return}else GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+
-a[b],0,this.internalFormat,this.format,this.type,this.data[b]);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_S,this.wrapS);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_T,this.wrapT);GL.texParameteri(this.textureType,GL.TEXTURE_MIN_FILTER,this.minFilter);GL.texParameteri(this.textureType,GL.TEXTURE_MAG_FILTER,this.magFilter);this.minFilter!==GL.NEAREST&&this.minFilter!==GL.LINEAR&&GL.generateMipmap(this.textureType);return this};b.prototype.updateTexture=function(b){if(this.texture!==void 0){var b=
-b!==void 0?b:{},f=b.level||0,e=b.xOffset||0,g=b.yOffset||0,h=b.updateMipmap!==void 0?b.updateMipmap:!0;this.data=b.data||this.data;GL.bindTexture(this.textureType,this.texture);if(this.textureType==GL.TEXTURE_2D)this.data instanceof Uint8Array?GL.texSubImage2D(this.textureType,f,e,g,this.width,this.height,this.format,this.type,this.data):GL.texSubImage2D(this.textureType,f,e,g,this.format,this.type,this.data);else for(var i in b)a[i]!==void 0&&(this.data[i]instanceof Uint8Array?GL.texSubImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+
-a[i],f,e,g,this.width,this.height,this.format,this.type,this.data[i]):GL.texSubImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[i],f,e,g,this.format,this.type,this.data[i]));this.minFilter!==GL.NEAREST&&this.minFilter!==GL.LINEAR&&h===!0&&GL.generateMipmap(this.textureType)}};b.prototype.swapTexture=function(a){this.dispose();this.data=a;this.init()};b.prototype.onLoadImage=function(){this.scope.createTexture();this.scope.onLoadComplete&&this.scope.onLoadComplete.call(this.scope.onLoadContext,this.scope)};
-b.prototype.onLoadCubeImage=function(){this.scope.itemsToLoad--;this.scope.itemsToLoad===0&&this.scope.createTexture()};b.prototype.onLoadVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.createTexture()};b.prototype.onLoadCubeVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.itemsToLoad--;this.scope.itemsToLoad===0&&this.scope.createTexture()};b.prototype.play=function(){if(this.textureType===GL.TEXTURE_2D)this.data instanceof
-HTMLVideoElement&&this.data.play();else for(var b in a)this.data[b]instanceof HTMLVideoElement&&this.data[b].play()};b.prototype.dispose=function(){if(this.texture!==void 0)GL.deleteTexture(this.texture),this.texture=void 0;this.data=void 0};return b}();
-GLOW.Shader=function(){function b(a){this.id=GLOW.uniqueId();this.compiledData=a.use?a.use.clone(a.except):GLOW.Compiler.compile(a);this.uniforms=this.compiledData.uniforms;this.elements=this.compiledData.elements;this.program=this.compiledData.program;this.attachData()}b.prototype.attachData=function(){var a,b,f;for(a in this.uniforms)this[a]===void 0?this.uniforms[a].data!==void 0?this[a]=this.uniforms[a].data:GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: no data for uniform "+a+", not attaching for easy access. Please use Shader.uniforms."+
-a+".data to set data."):this[a]!==this.uniforms[a].data&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on uniform "+a+", not attaching for easy access. Please use Shader.uniforms."+a+".data to access data.");for(b in this.compiledData.attributes){if(this.attributes===void 0)this.attributes=this.compiledData.attributes;this[b]===void 0?this[b]=this.compiledData.attributes[b]:this[b]!==this.compiledData.attributes[b]&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on attribute "+
-b+", not attaching for easy access. Please use Shader.attributes."+b+".data to access data.")}for(f in this.compiledData.interleavedAttributes){if(this.interleavedAttributes===void 0)this.interleavedAttributes=this.compiledData.interleavedAttributes;this[f]===void 0?this[f]=this.compiledData.interleavedAttributes[f]:this[f]!==this.compiledData.interleavedAttributes[f]&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on interleavedAttribute "+b+", not attaching for easy access. Please use Shader.interleavedAttributes."+
-b+".data to access data.")}};b.prototype.draw=function(){var a=this.compiledData,b=GLOW.currentContext.cache;if(!b.programCached(a.program)){GL.useProgram(a.program);var f=b.setProgramHighestAttributeNumber(a.program);if(f){var e=a.program.highestAttributeNumber,g=e-f+1;if(f>0)for(;g<=e;g++)GL.enableVertexAttribArray(g);else for(g--;g>e;g--)GL.disableVertexAttribArray(g)}}f=a.attributeArray;for(e=f.length;e--;)f[e].interleaved===!1&&(b.attributeCached(f[e])||f[e].bind());f=a.interleavedAttributeArray;
-for(e=f.length;e--;)b.interleavedAttributeCached(f[e])||f[e].bind();f=a.uniformArray;for(e=f.length;e--;)b.uniformCached(f[e])||f[e].load();a.elements.draw()};b.prototype.clone=function(a){return new GLOW.Shader({use:this.compiledData,except:a})};b.prototype.dispose=function(a,b){var f,e,g;for(f in this.compiledData.uniforms)delete this[f];for(e in this.compiledData.attributes)delete this[e];for(g in this.compiledData.interleavedAttributes)delete this[g];delete this.program;delete this.elements;delete this.uniforms;
-delete this.attributes;delete this.interleavedAttributes;this.compiledData.dispose(a,b);delete this.compiledData};return b}();
-GLOW.Elements=function(){function b(a,b,f,e){this.id=GLOW.uniqueId();this.type=b!==void 0?b:GL.TRIANGLES;this.offset=e!==void 0?e:0;typeof a==="number"||a===void 0?this.length=a:(a instanceof Uint16Array||(a=new Uint16Array(a)),this.length=a.length,this.elements=GL.createBuffer(),GL.bindBuffer(GL.ELEMENT_ARRAY_BUFFER,this.elements),GL.bufferData(GL.ELEMENT_ARRAY_BUFFER,a,f?f:GL.STATIC_DRAW))}b.prototype.draw=function(){this.elements!==void 0?(GLOW.currentContext.cache.elementsCached(this)||GL.bindBuffer(GL.ELEMENT_ARRAY_BUFFER,
-this.elements),GL.drawElements(this.type,this.length,GL.UNSIGNED_SHORT,this.offset)):GL.drawArrays(this.type,this.offset,this.length)};b.prototype.clone=function(a){a=a||{};return new GLOW.Elements(a.data||this.data,a.type||this.type,a.usage,a.offset||this.offset)};b.prototype.dispose=function(){this.elements!==void 0&&(GL.deleteBuffer(this.elements),delete this.elements)};return b}();
-GLOW.Uniform=function(){function b(){f[GL.INT]=function(){GL.uniform1iv(this.location,this.getNativeValue())};f[GL.FLOAT]=function(){GL.uniform1fv(this.location,this.getNativeValue())};f[GL.INT_VEC2]=function(){GL.uniform2iv(this.location,this.getNativeValue())};f[GL.INT_VEC3]=function(){GL.uniform3iv(this.location,this.getNativeValue())};f[GL.INT_VEC4]=function(){GL.uniform4iv(this.location,this.getNativeValue())};f[GL.BOOL]=function(){GL.uniform1iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC2]=
-function(){GL.uniform2iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC3]=function(){GL.uniform3iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC4]=function(){GL.uniform4iv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC2]=function(){GL.uniform2fv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC3]=function(){GL.uniform3fv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC4]=function(){GL.uniform4fv(this.location,this.getNativeValue())};f[GL.FLOAT_MAT2]=function(){GL.uniformMatrix2fv(this.location,
-!1,this.getNativeValue())};f[GL.FLOAT_MAT3]=function(){GL.uniformMatrix3fv(this.location,!1,this.getNativeValue())};f[GL.FLOAT_MAT4]=function(){GL.uniformMatrix4fv(this.location,!1,this.getNativeValue())};f[GL.SAMPLER_2D]=function(){this.data.texture!==void 0&&this.textureUnit!==-1&&!GLOW.currentContext.cache.textureCached(this.textureUnit,this.data)&&(GL.uniform1i(this.location,this.textureUnit),GL.activeTexture(GL.TEXTURE0+this.textureUnit),GL.bindTexture(GL.TEXTURE_2D,this.data.texture),this.data.autoUpdate&&
-this.data.updateTexture(this.data.autoUpdate))};f[GL.SAMPLER_CUBE]=function(){this.data.texture!==void 0&&this.textureUnit!==-1&&!GLOW.currentContext.cache.textureCached(this.textureUnit,this.data)&&(GL.uniform1i(this.location,this.textureUnit),GL.activeTexture(GL.TEXTURE0+this.textureUnit),GL.bindTexture(GL.TEXTURE_CUBE_MAP,this.data.texture),this.data.autoUpdate&&this.data.updateTexture(this.data.autoUpdate))}}function a(a,g){c||(c=!0,b());this.id=GLOW.uniqueId();this.data=g;this.name=a.name;this.length=
-a.length;this.type=a.type;this.location=a.location;this.locationNumber=a.locationNumber;this.textureUnit=-1;this.load=a.loadFunction||f[this.type]}var c=!1,f=[];a.prototype.getNativeValue=function(){return this.data.value};a.prototype.clone=function(a){return new GLOW.Uniform(this,a||this.data)};a.prototype.dispose=function(){delete this.data;delete this.load;delete this.location};return a}();
-GLOW.Attribute=function(){function b(b,e,g,h){a||(a=!0,c[GL.INT]=1,c[GL.INT_VEC2]=2,c[GL.INT_VEC3]=3,c[GL.INT_VEC4]=4,c[GL.BOOL]=1,c[GL.BOOL_VEC2]=2,c[GL.BOOL_VEC3]=3,c[GL.BOOL_VEC4]=4,c[GL.FLOAT]=1,c[GL.FLOAT_VEC2]=2,c[GL.FLOAT_VEC3]=3,c[GL.FLOAT_VEC4]=4,c[GL.FLOAT_MAT2]=4,c[GL.FLOAT_MAT3]=9,c[GL.FLOAT_MAT4]=16);this.id=GLOW.uniqueId();this.data=e;this.location=b.location;this.locationNumber=b.locationNumber;this.offset=this.stride=0;this.usage=g!==void 0?g:GL.STATIC_DRAW;this.interleaved=h!==void 0?
-h:!1;this.size=c[b.type];this.name=b.name;this.type=b.type;this.data&&(this.data.length/this.size>65536&&GLOW.warn("GLOW.Attribute.constructor: Unreachable attribute? Please activate GL.drawArrays or split into multiple shaders. Indexed elements cannot reach attribute data beyond 65535."),this.interleaved===!1&&this.bufferData(this.data,this.usage))}var a=!1,c=[];b.prototype.setupInterleave=function(a,b){this.interleaved=!0;this.offset=a;this.stride=b};b.prototype.bufferData=function(a,b){if(a!==
-void 0&&this.data!==a)this.data=a;if(b!==void 0&&this.usage!==b)this.usage=b;if(this.buffer===void 0)this.buffer=GL.createBuffer();if(this.data.constructor.toString().indexOf(" Array()")!==-1)this.data=new Float32Array(this.data);GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.bufferData(GL.ARRAY_BUFFER,this.data,this.usage)};b.prototype.bind=function(){this.interleaved===!1&&GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.vertexAttribPointer(this.location,this.size,GL.FLOAT,!1,this.stride,this.offset)};
-b.prototype.clone=function(a){if(this.interleaved)GLOW.error("GLOW.Attribute.clone: Cannot clone interleaved attribute. Please check your interleave setup.");else return a=a||{},new GLOW.Attribute(this,a.data||this.data,a.usage||this.usage,a.interleaved||this.interleaved)};b.prototype.dispose=function(){this.buffer&&(GL.deleteBuffer(this.buffer),delete this.buffer);delete this.data};return b}();
-GLOW.InterleavedAttributes=function(){function b(a){this.id=GLOW.uniqueId();this.attributes=a;var b,f=a[0].data.length/a[0].size,e,g=a.length,h,i,j,k=[],l,m=[];for(e=0;e<g;e++)k[e]=0;for(b=0;b<f;b++)for(e=0;e<g;e++){l=a[e].data;j=k[e];h=0;for(i=a[e].size;h<i;h++)m.push(l[j++]);k[e]=j}this.data=new Float32Array(m);this.usage=a[0].usage;for(e=0;e<g;e++)if(this.usage!==a[e].usage){GLOW.warn("GLOW.InterleavedAttributes.construct: Attribute "+a[e].name+" has different usage, defaulting to STATIC_DRAW.");
-this.usage=GL.STATIC_DRAW;break}this.bufferData(this.data,this.usage);for(e=b=0;e<g;e++)b+=a[e].size*4;for(e=f=0;e<g;e++)a[e].setupInterleave(f,b),f+=a[e].size*4}b.prototype.bufferData=function(a,b){if(a!==void 0&&this.data!==a)this.data=a;if(this.buffer===void 0)this.buffer=GL.createBuffer();GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.bufferData(GL.ARRAY_BUFFER,this.data,b?b:GL.STATIC_DRAW)};b.prototype.bind=function(){GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);for(var a=this.attributes.length;a--;)this.attributes[a].bind()};
-b.prototype.dispose=function(){this.buffer&&(GL.deleteBuffer(this.buffer),delete this.buffer);delete this.data;if(this.attributes){for(var a=this.attributes.length;a--;)this.attributes[a].dispose();delete this.attributes}};return b}();
-GLOW.Float=function(){function b(a){a!==void 0&&a.length?this.value=new Float32Array(a):(this.value=new Float32Array(1),this.value[0]=a!==void 0?a:0)}b.prototype.set=function(a){this.value[0]=a;return this};b.prototype.add=function(a){this.value[0]+=a;return this};b.prototype.sub=function(a){this.value[0]-=a;return this};b.prototype.multiply=function(a){this.value[0]*=a;return this};b.prototype.divide=function(a){this.value[0]/=a;return this};b.prototype.modulo=function(a){this.value[0]%=a;return this};
-return b}();
-GLOW.Int=function(){function b(a){a!==void 0&&a.length?this.value=new Int32Array(a):(this.value=new Int32Array(1),this.value[0]=a!==void 0?a:0)}b.prototype.set=function(a){this.value[0]=a;return this};b.prototype.add=function(a){this.value[0]+=a;return this};b.prototype.sub=function(a){this.value[0]-=a;return this};b.prototype.multiply=function(a){this.value[0]*=a;return this};b.prototype.divide=function(a){this.value[0]/=a;return this};b.prototype.modulo=function(a){this.value[0]%=a;return this};
-return b}();GLOW.Bool=function(){function b(a){this.value=[];this.value[0]=a!==void 0?!!a:!1}b.prototype.set=function(a){this.value[0]=!!a;return this};return b}();GLOW.Bool2=function(){function b(a,b){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1}b.prototype.set=function(a,b){this.value[0]=!!a;this.value[1]=!!b;return this};return b}();
-GLOW.Bool3=function(){function b(a,b,f){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1;this.value[2]=f!==void 0?!!f:!1}b.prototype.set=function(a,b,f){this.value[0]=!!a;this.value[1]=!!b;this.value[2]=!!f;return this};return b}();
-GLOW.Bool4=function(){function b(a,b,f,e){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1;this.value[2]=f!==void 0?!!f:!1;this.value[3]=e!==void 0?!!e:!1}b.prototype.set=function(a,b,f,e){this.value[0]=!!a;this.value[1]=!!b;this.value[2]=!!f;this.value[3]=!!e;return this};return b}();
-GLOW.Vector2=function(){function b(a,b){this.value=new Float32Array(2);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0}b.prototype.set=function(a,b){this.value[0]=a;this.value[1]=b;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];return this};b.prototype.addSelf=function(a){this.value[0]+=a.value[0];this.value[1]+=a.value[1];return this};b.prototype.add=function(a,b){this.value[0]=a.value[0]+b.value[0];this.value[1]=a.value[1]+b.value[1];return this};
-b.prototype.subSelf=function(a){this.value[0]-=a.x;this.value[1]-=a.y;return this};b.prototype.sub=function(a,b){this.value[0]=a.value[0]-b.value[0];this.value[1]=a.value[1]-b.value[1];return this};b.prototype.multiplySelf=function(a){this.value[0]*=a.value[0];this.value[1]*=a.value[1];return this};b.prototype.multiply=function(a,b){this.value[0]=a.value[0]*b.value[0];this.value[1]=a.value[1]*b.value[1];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;return this};
-b.prototype.negate=function(){this.value[0]=-this.value[0];this.value[1]=-this.value[1];return this};b.prototype.normalize=function(){this.multiplyScalar(1/this.length());return this};b.prototype.length=function(){return Math.sqrt(this.lengthSq())};b.prototype.lengthSq=function(){return this.value[0]*this.value[0]+this.value[1]*this.value[1]};b.prototype.clone=function(){return new GLOW.Vector2(this.value[0],this.value[1])};return b}();
-GLOW.Vector3=function(){function b(a,b,f){this.value=new Float32Array(3);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0;this.value[2]=f!==void 0?f:0}b.prototype.set=function(a,b,f){this.value[0]=a;this.value[1]=b;this.value[2]=f;return this};b.prototype.copy=function(a){this.set(a.value[0],a.value[1],a.value[2]);return this};b.prototype.add=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]+b[0];this.value[1]=a[1]+b[1];this.value[2]=a[2]+b[2];return this};b.prototype.addSelf=function(a){a=
-a.value;this.value[0]+=a[0];this.value[1]+=a[1];this.value[2]+=a[2];return this};b.prototype.addScalar=function(a){this.value[0]+=a;this.value[1]+=a;this.value[2]+=a;return this};b.prototype.sub=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]-b[0];this.value[1]=a[1]-b[1];this.value[2]=a[2]-b[2];return this};b.prototype.subSelf=function(a){a=a.value;this.value[0]-=a[0];this.value[1]-=a[1];this.value[2]-=a[2];return this};b.prototype.cross=function(a,b){a=a.value;b=b.value;this.value[0]=a[1]*b[2]-
-a[2]*b[1];this.value[1]=a[2]*b[0]-a[0]*b[2];this.value[2]=a[0]*b[1]-a[1]*b[0];return this};b.prototype.crossSelf=function(a){var a=a.value,b=a[0],f=a[1],a=a[2],e=this.value[0],g=this.value[1],h=this.value[2];this.value[0]=f*h-a*g;this.value[1]=a*e-b*h;this.value[2]=b*g-f*e;return this};b.prototype.multiply=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]*b[0];this.value[1]=a[1]*b[1];this.value[2]=a[2]*b[2];return this};b.prototype.multiplySelf=function(a){a=a.value;this.value[0]*=a[0];this.value[1]*=
-a[1];this.value[2]*=a[2];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=a;return this};b.prototype.divideSelf=function(a){a=a.value;this.value[0]/=a[0];this.value[1]/=a[1];this.value[2]/=a[2];return this};b.prototype.divideScalar=function(a){this.value[0]/=a;this.value[1]/=a;this.value[2]/=a;return this};b.prototype.negate=function(){this.value[0]=-this.value[0];this.value[1]=-this.value[1];this.value[2]=-this.value[2];return this};b.prototype.dot=
-function(a){a=a.value;return this.value[0]*a[0]+this.value[1]*a[1]+this.value[2]*a[2]};b.prototype.distanceTo=function(a){return Math.sqrt(this.distanceToSquared(a))};b.prototype.distanceToSquared=function(a){var a=a.value,b=this.value[0]-a[0],f=this.value[1]-a[1],a=this.value[2]-a[2];return b*b+f*f+a*a};b.prototype.length=function(){return Math.sqrt(this.lengthSq())};b.prototype.lengthSq=function(){return this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2]};b.prototype.lengthManhattan=
-function(){return this.value[0]+this.value[1]+this.value[2]};b.prototype.normalize=function(){var a=Math.sqrt(this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2]);a>0?this.multiplyScalar(1/a):this.set(0,0,0);return this};b.prototype.setPositionFromMatrix=function(a){a=a.value;this.value[0]=a[12];this.value[1]=a[13];this.value[2]=a[14]};b.prototype.setLength=function(a){return this.normalize().multiplyScalar(a)};b.prototype.isZero=function(){return Math.abs(this.value[0])<
-1.0E-4&&Math.abs(this.value[1])<1.0E-4&&Math.abs(this.value[2])<1.0E-4};b.prototype.clone=function(){return GLOW.Vector3(this.value[0],this.value[1],this.value[2])};return b}();
-GLOW.Vector4=function(){function b(a,b,f,e){this.value=new Float32Array(4);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0;this.value[2]=f!==void 0?f:0;this.value[3]=e!==void 0?e:0}b.prototype.set=function(a,b,f,e){this.value[0]=a;this.value[1]=b;this.value[2]=f;this.value[3]=e;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];this.value[2]=a.value[2];this.value[3]=a.value[3];return this};b.prototype.add=function(a,b){this.value[0]=a.value[0]+b.value[0];
-this.value[1]=a.value[1]+b.value[1];this.value[2]=a.value[2]+b.value[2];this.value[3]=a.value[3]+b.value[3];return this};b.prototype.addSelf=function(a){this.value[0]+=a.value[0];this.value[1]+=a.value[1];this.value[2]+=a.value[2];this.value[3]+=a.value[3];return this};b.prototype.sub=function(a,b){this.value[0]=a.value[0]-b.value[0];this.value[1]=a.value[1]-b.value[1];this.value[2]=a.value[2]-b.value[2];this.value[3]=a.value[3]-b.value[3];return this};b.prototype.subSelf=function(a){this.value[0]-=
-a.value[0];this.value[1]-=a.value[1];this.value[2]-=a.value[2];this.value[3]-=a.value[3];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=a;this.value[3]*=a;return this};b.prototype.divideScalar=function(a){this.value[0]/=a;this.value[1]/=a;this.value[2]/=a;this.value[3]/=a;return this};b.prototype.lerpSelf=function(a,b){this.value[0]+=(a.x-this.value[0])*b;this.value[1]+=(a.y-this.value[1])*b;this.value[2]+=(a.z-this.value[2])*b;this.value[3]+=
-(a.w-this.value[3])*b;return this};b.prototype.lengthOfXYZ=function(){return Math.sqrt(this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2])};b.prototype.clone=function(){return new GLOW.Vector4(this.value[0],this.value[1],this.value[2],this.value[3])};return b}();
-GLOW.Matrix3=function(){function b(){this.value=new Float32Array(9);this.identity()}b.prototype.set=function(a,b,f,e,g,h,i,j,k){this.value[0]=a;this.value[3]=b;this.value[6]=f;this.value[1]=e;this.value[4]=g;this.value[7]=h;this.value[2]=i;this.value[5]=j;this.value[8]=k;return this};b.prototype.identity=function(){this.set(1,0,0,0,1,0,0,0,1);return this};b.prototype.extractFromMatrix4=function(a){this.set(a.value[0],a.value[4],a.value[8],a.value[1],a.value[5],a.value[9],a.value[2],a.value[6],a.value[10]);
-return this};b.prototype.multiplyVector3=function(a){var b=a.value[0],f=a.value[1],e=a.value[2];a.value[0]=this.value[0]*b+this.value[3]*f+this.value[6]*e;a.value[1]=this.value[1]*b+this.value[4]*f+this.value[7]*e;a.value[2]=this.value[2]*b+this.value[5]*f+this.value[8]*e;return a};return b}();
-GLOW.Matrix4=function(){function b(){this.value=new Float32Array(16);this.rotation=new GLOW.Vector3;this.position=new GLOW.Vector3;this.columnX=new GLOW.Vector3;this.columnY=new GLOW.Vector3;this.columnZ=new GLOW.Vector3;this.identity()}b.prototype.set=function(a,b,f,e,g,h,i,j,k,l,m,o,n,r,p,q){this.value[0]=a;this.value[4]=b;this.value[8]=f;this.value[12]=e;this.value[1]=g;this.value[5]=h;this.value[9]=i;this.value[13]=j;this.value[2]=k;this.value[6]=l;this.value[10]=m;this.value[14]=o;this.value[3]=
-n;this.value[7]=r;this.value[11]=p;this.value[15]=q;return this};b.prototype.identity=function(){this.set(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1);return this};b.prototype.copy=function(a){a=a.value;this.set(a[0],a[4],a[8],a[12],a[1],a[5],a[9],a[13],a[2],a[6],a[10],a[14],a[3],a[7],a[11],a[15]);return this};b.prototype.lookAt=function(a,b){var f=GLOW.Matrix4.tempVector3A,e=GLOW.Matrix4.tempVector3B,g=GLOW.Matrix4.tempVector3C,h=this.getPosition();h.value[0]=this.value[12];h.value[1]=this.value[13];h.value[2]=
-this.value[14];g.sub(h,a).normalize();g.length()===0&&(g.value[3]=1);f.cross(b,g).normalize();f.length()===0&&(g.value[0]+=1.0E-4,f.cross(b,g).normalize());e.cross(g,f).normalize();f=f.value;e=e.value;g=g.value;this.value[0]=f[0];this.value[4]=e[0];this.value[8]=g[0];this.value[1]=f[1];this.value[5]=e[1];this.value[9]=g[1];this.value[2]=f[2];this.value[6]=e[2];this.value[10]=g[2];return this};b.prototype.multiplyVector3=function(a){var b=a.value[0],f=a.value[1],e=a.value[2],g=1/(this.value[3]*b+this.value[7]*
-f+this.value[11]*e+this.value[15]);a.value[0]=(this.value[0]*b+this.value[4]*f+this.value[8]*e+this.value[12])*g;a.value[1]=(this.value[1]*b+this.value[5]*f+this.value[9]*e+this.value[13])*g;a.value[2]=(this.value[2]*b+this.value[6]*f+this.value[10]*e+this.value[14])*g;return a};b.prototype.multiplyVector4=function(a){var b=a.value[0],f=a.value[1],e=a.value[2],g=a.value[3];a.value[0]=this.value[0]*b+this.value[4]*f+this.value[8]*e+this.value[12]*g;a.value[1]=this.value[1]*b+this.value[5]*f+this.value[9]*
-e+this.value[13]*g;a.value[2]=this.value[2]*b+this.value[6]*f+this.value[10]*e+this.value[14]*g;a.value[3]=this.value[3]*b+this.value[7]*f+this.value[11]*e+this.value[15]*g;return a};b.prototype.rotateAxis=function(a){var b=a.value[0],f=a.value[1],e=a.value[2];a.value[0]=b*this.value[0]+f*this.value[4]+e*this.value[8];a.value[1]=b*this.value[1]+f*this.value[5]+e*this.value[9];a.value[2]=b*this.value[2]+f*this.value[6]+e*this.value[10];a.normalize();return a};b.prototype.crossVector=function(a){var b=
-GLOW.Vector4(),f=a.value[0],e=a.value[1],g=a.value[2],a=a.value[3];b.value[0]=this.value[0]*f+this.value[4]*e+this.value[8]*g+this.value[12]*a;b.value[1]=this.value[1]*f+this.value[5]*e+this.value[9]*g+this.value[13]*a;b.value[2]=this.value[2]*f+this.value[6]*e+this.value[10]*g+this.value[14]*a;b.value[3]=a?this.value[3]*f+this.value[7]*e+this.value[11]*g+this.value[15]*a:1;return b};b.prototype.multiply=function(a,b){var a=a.value,b=b.value,f=a[0],e=a[4],g=a[8],h=a[12],i=a[1],j=a[5],k=a[9],l=a[13],
-m=a[2],o=a[6],n=a[10],r=a[14],p=a[3],q=a[7],s=a[11],t=a[15],u=b[0],v=b[4],x=b[8],w=b[12],y=b[1],z=b[5],A=b[9],B=b[13],C=b[2],D=b[6],E=b[10],F=b[14];this.value[0]=f*u+e*y+g*C;this.value[4]=f*v+e*z+g*D;this.value[8]=f*x+e*A+g*E;this.value[12]=f*w+e*B+g*F+h;this.value[1]=i*u+j*y+k*C;this.value[5]=i*v+j*z+k*D;this.value[9]=i*x+j*A+k*E;this.value[13]=i*w+j*B+k*F+l;this.value[2]=m*u+o*y+n*C;this.value[6]=m*v+o*z+n*D;this.value[10]=m*x+o*A+n*E;this.value[14]=m*w+o*B+n*F+r;this.value[3]=p*u+q*y+s*C;this.value[7]=
-p*v+q*z+s*D;this.value[11]=p*x+q*A+s*E;this.value[15]=p*w+q*B+s*F+t;return this};b.prototype.multiplySelf=function(a){this.multiply(this,a);return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[4]*=a;this.value[8]*=a;this.value[12]*=a;this.value[1]*=a;this.value[5]*=a;this.value[9]*=a;this.value[13]*=a;this.value[2]*=a;this.value[6]*=a;this.value[10]*=a;this.value[14]*=a;this.value[3]*=a;this.value[7]*=a;this.value[11]*=a;this.value[15]*=a;return this};b.prototype.determinant=
-function(){var a=this.value[0],b=this.value[4],f=this.value[8],e=this.value[12],g=this.value[1],h=this.value[5],i=this.value[9],j=this.value[13],k=this.value[2],l=this.value[6],m=this.value[10],o=this.value[14],n=this.value[3],r=this.value[7],p=this.value[11],q=this.value[15];return e*i*l*n-f*j*l*n-e*h*m*n+b*j*m*n+f*h*o*n-b*i*o*n-e*i*k*r+f*j*k*r+e*g*m*r-a*j*m*r-f*g*o*r+a*i*o*r+e*h*k*p-b*j*k*p-e*g*l*p+a*j*l*p+b*g*o*p-a*h*o*p-f*h*k*q+b*i*k*q+f*g*l*q-a*i*l*q-b*g*m*q+a*h*m*q};b.prototype.transpose=function(){var a;
-a=this.value[1];this.value[1]=this.value[4];this.value[4]=a;a=this.value[2];this.value[2]=this.value[8];this.value[8]=a;a=this.value[6];this.value[6]=this.value[9];this.value[9]=a;a=this.value[3];this.value[3]=this.value[12];this.value[12]=a;a=this.value[7];this.value[7]=this.value[13];this.value[13]=a;a=this.value[11];this.value[11]=this.value[14];this.value[11]=a;return this};b.prototype.clone=function(){var a=new GLOW.Matrix4;a.value=new Float32Array(this.value);return a};b.prototype.setPosition=
-function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[12]=e;this.value[13]=b;this.value[14]=f;return this};b.prototype.addPosition=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[12]+=e;this.value[13]+=b;this.value[14]+=f};b.prototype.setRotation=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);var a=Math.cos(b),b=Math.sin(b),g=Math.cos(f),f=Math.sin(f),h=Math.cos(e);
-e=Math.sin(e);this.value[0]=a*g;this.value[4]=b*e-a*f*h;this.value[8]=a*f*e+b*h;this.value[1]=f;this.value[5]=g*h;this.value[9]=-g*e;this.value[2]=-b*g;this.value[6]=b*f*h+a*e;this.value[10]=-b*f*e+a*h;return this};b.prototype.addRotation=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.rotation.value[0]+=e;this.rotation.value[1]+=b;this.rotation.value[2]+=f;this.setRotation(this.rotation.value[0],this.rotation.value[1],this.rotation.value[2])};b.prototype.getPosition=
-function(){this.position.set(this.value[12],this.value[13],this.value[14]);return this.position};b.prototype.getColumnX=function(){this.columnX.set(this.value[0],this.value[1],this.value[2]);return this.columnX};b.prototype.getColumnY=function(){this.columnY.set(this.value[4],this.value[5],this.value[6]);return this.columnY};b.prototype.getColumnZ=function(){this.columnZ.set(this.value[8],this.value[9],this.value[10]);return this.columnZ};b.prototype.scale=function(a,b,f){var e;b!==void 0&&f!==void 0?
-e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[0]*=e;this.value[4]*=b;this.value[8]*=f;this.value[1]*=e;this.value[5]*=b;this.value[9]*=f;this.value[2]*=e;this.value[6]*=b;this.value[10]*=f;this.value[3]*=e;this.value[7]*=b;this.value[11]*=f;return this};b.prototype.invert=function(){GLOW.Matrix4.makeInverse(this,this);return this};return b}();
-GLOW.Matrix4.makeInverse=function(b,a){a===void 0&&(a=new GLOW.Matrix4);var c=b.value,f=a.value,e=c[0],g=c[4],h=c[8],i=c[12],j=c[1],k=c[5],l=c[9],m=c[13],o=c[2],n=c[6],r=c[10],p=c[14],q=c[3],s=c[7],t=c[11],c=c[15];f[0]=l*p*s-m*r*s+m*n*t-k*p*t-l*n*c+k*r*c;f[1]=m*r*q-l*p*q-m*o*t+j*p*t+l*o*c-j*r*c;f[2]=k*p*q-m*n*q+m*o*s-j*p*s-k*o*c+j*n*c;f[3]=l*n*q-k*r*q-l*o*s+j*r*s+k*o*t-j*n*t;f[4]=i*r*s-h*p*s-i*n*t+g*p*t+h*n*c-g*r*c;f[5]=h*p*q-i*r*q+i*o*t-e*p*t-h*o*c+e*r*c;f[6]=i*n*q-g*p*q-i*o*s+e*p*s+g*o*c-e*n*c;
-f[7]=g*r*q-h*n*q+h*o*s-e*r*s-g*o*t+e*n*t;f[8]=h*m*s-i*l*s+i*k*t-g*m*t-h*k*c+g*l*c;f[9]=i*l*q-h*m*q-i*j*t+e*m*t+h*j*c-e*l*c;f[10]=h*m*q-i*k*q+i*j*s-e*m*s-g*j*c+e*k*c;f[11]=h*k*q-g*l*q-h*j*s+e*l*s+g*j*t-e*k*t;f[12]=i*l*n-h*m*n-i*k*r+g*m*r+h*k*p-g*l*p;f[13]=h*m*o-i*l*o+i*j*r-e*m*r-h*j*p+e*l*p;f[14]=i*k*o-g*m*o-i*j*n+e*m*n+g*j*p-e*k*p;f[15]=g*l*o-h*k*o+h*j*n-e*l*n-g*j*r+e*k*r;a.multiplyScalar(1/b.determinant());return a};
-GLOW.Matrix4.makeFrustum=function(b,a,c,f,e,g,h){var i,h=h||new GLOW.Matrix4;i=h.value;i[0]=2*e/(a-b);i[4]=0;i[8]=(a+b)/(a-b);i[12]=0;i[1]=0;i[5]=2*e/(f-c);i[9]=(f+c)/(f-c);i[13]=0;i[2]=0;i[6]=0;i[10]=-(g+e)/(g-e);i[14]=-2*g*e/(g-e);i[3]=0;i[7]=0;i[11]=-1;i[15]=0;return h};GLOW.Matrix4.makeProjection=function(b,a,c,f,e){var g,b=c*Math.tan(b*Math.PI/360);g=-b;return GLOW.Matrix4.makeFrustum(g*a,b*a,g,b,c,f,e)};
-GLOW.Matrix4.makeOrtho=function(b,a,c,f,e,g,h){var i,j,k,l,h=h||new GLOW.Matrix4;j=Math.abs(a-b);k=Math.abs(c-f);l=Math.abs(g-e);i=h.value;i[0]=2/j;i[4]=0;i[8]=0;i[12]=-((a+b)/j);i[1]=0;i[5]=2/k;i[9]=0;i[13]=-((c+f)/k);i[2]=0;i[6]=0;i[10]=-2/l;i[14]=-((g+e)/l);i[3]=0;i[7]=0;i[11]=0;i[15]=1;return h};GLOW.Matrix4.tempVector3A=new GLOW.Vector3;GLOW.Matrix4.tempVector3B=new GLOW.Vector3;GLOW.Matrix4.tempVector3C=new GLOW.Vector3;GLOW.Matrix4.tempVector3D=new GLOW.Vector3;
-GLOW.Color=function(){function b(a,b,f){this.value=new Float32Array(3);b===void 0&&f===void 0?this.setHex(a||0):this.setRGB(a,b,f)}b.prototype.setRGB=function(a,b,f){this.value[0]=a!==void 0?a/255:1;this.value[1]=b!==void 0?b/255:1;this.value[2]=f!==void 0?f/255:1;return this};b.prototype.setHex=function(a){this.value[0]=((a&16711680)>>16)/255;this.value[1]=((a&65280)>>8)/255;this.value[2]=(a&255)/255;return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=
-a;return this};b.prototype.mix=function(a,b){var f=1-b;this.value[0]=this.value[0]*f+a.value[0]*b;this.value[1]=this.value[1]*f+a.value[1]*b;this.value[2]=this.value[2]*f+a.value[2]*b;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];this.value[2]=a.value[2];return this};b.prototype.setHSV=function(a,b,f){var e,g,h,i,j,k;if(f==0)e=g=h=0;else switch(i=Math.floor(a*6),j=a*6-i,a=f*(1-b),k=f*(1-b*j),b=f*(1-b*(1-j)),i){case 1:e=k;g=f;h=a;break;case 2:e=a;g=f;h=
-b;break;case 3:e=a;g=k;h=f;break;case 4:e=b;g=a;h=f;break;case 5:e=f;g=a;h=k;break;case 6:case 0:e=f,g=b,h=a}this.value[0]=e;this.value[1]=g;this.value[2]=h;return this};return b}();
-GLOW.Geometry={randomVector3Array:function(b,a){var a=a!==void 0?a:1,c,f=[],e=a*2;for(c=0;c<b;c++)f.push(GLOW.Vector3(Math.random()*e-a,Math.random()*e-a,Math.random()*e-a));return f},randomArray:function(b,a,c,f){var e=[],g=0,h,i;for(i=0;i<b/f;i++){g=a+Math.random()*c;for(h=0;h<f;h++)e.push(g)}return e},triangles:function(b){return this.elements(b)},elements:function(b){var a=0,c,f=new Uint16Array(b*3);for(c=0;c<b;c++)f[a]=a++,f[a]=a++,f[a]=a++;return f},faceNormals:function(b,a){var c=Array(b.length),
-f,e=a.length,g,h,i,j=new GLOW.Vector3,k=new GLOW.Vector3,l=new GLOW.Vector3,m=new GLOW.Vector3;for(f=0;f<e;)g=a[f++]*3,h=a[f++]*3,i=a[f++]*3,j.set(b[g+0],b[g+1],b[g+2]),k.set(b[h+0],b[h+1],b[h+2]),l.set(b[i+0],b[i+1],b[i+2]),k.subSelf(j),l.subSelf(j),m.cross(k,l).normalize(),c[g+0]=m.value[0],c[g+1]=m.value[1],c[g+2]=m.value[2],c[h+0]=m.value[0],c[h+1]=m.value[1],c[h+2]=m.value[2],c[i+0]=m.value[0],c[i+1]=m.value[1],c[i+2]=m.value[2];return c},flatShade:function(b,a){if(b.triangles===void 0||b.data===
-void 0)GLOW.error("GLOW.Geometry.flatShade: missing .data and/or .triangles in shader config object. Quitting.");else if(a===void 0)GLOW.error("GLOW.Geometry.flatShade: missing attribute data sizes. Quitting.");else{var c=b.triangles,f=c.length/3,e=b.data,g=[],h,i,j,k,l,m,o;for(j in a)if(e[j]){h=e[j];flatShadedAttribute=[];i=a[j];k=0;for(l=f*3;k<l;k++){m=0;for(o=i;m<o;m++)flatShadedAttribute.push(h[c[k]*i+m])}k=h.length=0;for(l=flatShadedAttribute.length;k<l;k++)h[k]=flatShadedAttribute[k]}k=0;l=
-f;for(m=0;k<l;k++)g[m]=m++,g[m]=m++,g[m]=m++;b.triangles=g}}};
-GLOW.Geometry.Cube={vertices:function(b){var a=new Float32Array(72),c=0,b=b!==void 0?b*0.5:5;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;
-a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;return a},indices:function(){var b=new Uint16Array(36),a=0;b[a++]=0;b[a++]=1;b[a++]=2;b[a++]=0;b[a++]=2;b[a++]=3;b[a++]=4;b[a++]=5;b[a++]=6;b[a++]=4;b[a++]=6;b[a++]=7;b[a++]=8;b[a++]=9;b[a++]=
-10;b[a++]=8;b[a++]=10;b[a++]=11;b[a++]=12;b[a++]=13;b[a++]=14;b[a++]=12;b[a++]=14;b[a++]=15;b[a++]=16;b[a++]=17;b[a++]=18;b[a++]=16;b[a++]=18;b[a++]=19;b[a++]=20;b[a++]=21;b[a++]=22;b[a++]=20;b[a++]=22;b[a++]=23;return b},primitives:function(){return GL.TRIANGLES},uvs:function(){var b=new Float32Array(48),a=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=
-0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;return b},normals:function(){return GLOW.Geometry.faceNormals(GLOW.Geometry.Cube.vertices(),GLOW.Geometry.Cube.indices())}};
-GLOW.Geometry.Cylinder={vertices:function(b,a,c,f){b|=7;a|=1;c|=1;f|=1;for(var e=[],g=Math.PI*2,h=f*0.5,f=0;f<b;f++)e.push(Math.sin(g*f/b)*a),e.push(h),e.push(Math.cos(g*f/b)*a);for(f=0;f<b;f++)e.push(Math.sin(g*f/b)*c),e.push(-h),e.push(Math.cos(g*f/b)*c);e.push(0);e.push(h);e.push(0);e.push(0);e.push(-h);e.push(0);return e},indices:function(b){b|=7;var a,c,f,e,g,h=[];for(g=0;g<b;g++)a=g,c=g+b,f=b+(g+1)%b,e=(g+1)%b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);for(g=b;g<b+b*0.5;g++)a=
-2*b,c=(2*g-2*b+0)%b,f=(2*g-2*b+1)%b,e=(2*g-2*b+2)%b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);for(g=b+b*0.5;g<2*b;g++)a=2*b+1,c=(2*g-2*b+2)%b+b,f=(2*g-2*b+1)%b+b,e=(2*g-2*b+0)%b+b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);return h},uvs:function(){},primitives:function(){return GL.TRIANGLES},normals:function(b){return GLOW.Geometry.faceNormals(GLOW.Geometry.Cylinder.vertices(b),GLOW.Geometry.Cylinder.indices(b))}};
-GLOW.Geometry.Plane={vertices:function(b,a){var c=new Float32Array(12),f=0,b=b!==void 0?b*0.5:1;a?(c[f++]=-b,c[f++]=0,c[f++]=-b,c[f++]=-b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=-b):(c[f++]=+b,c[f++]=-b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=-b,c[f++]=+b,c[f++]=0,c[f++]=-b,c[f++]=-b,c[f++]=0);return c},indices:function(){var b=new Uint16Array(6),a=0;b[a++]=0;b[a++]=1;b[a++]=2;b[a++]=0;b[a++]=2;b[a++]=3;return b},uvs:function(b){var a=new Float32Array(8),c=0;
-b?(a[c++]=0,a[c++]=0,a[c++]=0,a[c++]=1,a[c++]=1,a[c++]=1,a[c++]=1):(a[c++]=1,a[c++]=0,a[c++]=1,a[c++]=1,a[c++]=0,a[c++]=1,a[c++]=0);a[c++]=0;return a},primitives:function(){return GL.TRIANGLES}};
-GLOW.Node=function(b){this.localMatrix=new GLOW.Matrix4;this.globalMatrix=new GLOW.Matrix4;this.viewMatrix=new GLOW.Matrix4;this.updateRotationMatrix=!1;this.rotationMatrix=new GLOW.Matrix3;this.useXYZStyleTransform=!1;this.position={x:0,y:0,z:0};this.rotation={x:0,y:0,z:0};this.scale={x:1,y:1,z:1};this.children=[];this.parent=void 0;if(b)this.shader=b,this.draw=b.draw};
-GLOW.Node.prototype.update=function(b,a){this.useXYZStyleTransform&&(this.localMatrix.setPosition(this.position.x,this.position.y,this.position.z),this.localMatrix.setRotation(this.rotation.x,this.rotation.y,this.rotation.z),this.localMatrix.scale(this.scale.x,this.scale.y,this.scale.z));b?this.globalMatrix.multiply(b,this.localMatrix):this.globalMatrix.copy(this.localMatrix);this.updateRotationMatrix&&this.rotationMatrix.extractFromMatrix4(this.globalMatrix);a&&this.viewMatrix.multiply(a,this.globalMatrix);
-var c,f=this.children.length;for(c=0;c<f;c++)this.children[c].update(this.globalMatrix,a);return this};GLOW.Node.prototype.addChild=function(b){if(this.children.indexOf(b)===-1)this.children.push(b),b.parent&&b.parent.removeChild(b),b.parent=this;return this};GLOW.Node.prototype.removeChild=function(b){var a=this.children.indexOf(b);if(a!==-1)this.children.splice(1,a),b.parent=void 0;return this};
-GLOW.Camera=function(b){GLOW.Node.call(this);b=b!==void 0?b:{};this.fov=b.fov!==void 0?b.fov:40;this.aspect=b.aspect!==void 0?b.aspect:window.innerWidth/window.innerHeight;this.near=b.near!==void 0?b.near:0.1;this.far=b.far!==void 0?b.far:1E4;this.useTarget=b.useTarget!==void 0?b.useTarget:!0;this.projection=b.ortho!==void 0?GLOW.Matrix4.makeOrtho(b.ortho.left,b.ortho.right,b.ortho.top,b.ortho.bottom,this.near,this.far):GLOW.Matrix4.makeProjection(this.fov,this.aspect,this.near,this.far);this.inverse=
-new GLOW.Matrix4;this.target=new GLOW.Vector3(0,0,-100);this.up=new GLOW.Vector3(0,1,0);this.update()};GLOW.Camera.prototype=new GLOW.Node;GLOW.Camera.prototype.constructor=GLOW.Camera;GLOW.Camera.prototype.supr=GLOW.Node.prototype;
-GLOW.Camera.prototype.update=function(b,a){this.useXYZStyleTransform?(this.localMatrix.setPosition(this.position.x,this.position.y,this.position.z),this.useTarget?this.localMatrix.lookAt(this.target,this.up):this.localMatrix.setRotation(this.rotation.x,this.rotation.y,this.rotation.z),this.localMatrix.scale(this.scale.x,this.scale.y,this.scale.z)):this.useTarget&&this.localMatrix.lookAt(this.target,this.up);b?this.globalMatrix.multiply(b,this.localMatrix):this.globalMatrix.copy(this.localMatrix);
-GLOW.Matrix4.makeInverse(this.globalMatrix,this.inverse);var c,f=this.children.length;for(c=0;c<f;c++)this.children[c].update(this.globalMatrix,a)};GLOW.defaultCamera=new GLOW.Camera;
-GLOW.Load=function(){function b(a){this.parameters=a;this.onLoadComplete=void 0;this.onLoadContext=null;this.onLoadItem=void 0;this.numItemsLeftToLoad=this.numItemsToLoad=0;for(var b in a)b!=="onLoadComplete"&&b!=="onLoadItem"&&b!=="dontParseJS"&&b!="onLoadContext"?this.numItemsToLoad++:(this[b]=a[b],delete a[b]);this.numItemsLeftToLoad=this.numItemsToLoad;for(b in a){var f=a[b],e=a[b];e.indexOf(".png")!==-1||e.indexOf(".gif")!==-1||e.indexOf(".jpg")!==-1||e.indexOf("jpeg")!==-1?(a[b]=new Image,a[b].scope=
-this,a[b].onload=this.onLoadImage,a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].src=f):e.indexOf(".glsl")!==-1?(a[b]=new XMLHttpRequest,a[b].scope=this,a[b].parametersProperty=b,a[b].open("GET",f),a[b].onreadystatechange=this.onLoadGLSL,a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].send()):e.indexOf(".js")!==-1||e.indexOf(".json")!==-1?(a[b]=new XMLHttpRequest,a[b].scope=this,a[b].parametersProperty=b,a[b].open("GET",f),a[b].onreadystatechange=this.onLoadJSON,
-a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].send()):(a[b]=document.createElement("video"),a[b].scope=this,a[b].addEventListener("loadeddata",this.onLoadVideo,!1),a[b].src=f)}}b.prototype.handleLoadedItem=function(){this.numItemsLeftToLoad--;this.onLoadItem!==void 0&&this.onLoadItem.call(this.onLoadContext,1-this.numItemsLeftToLoad/this.numItemsToLoad);this.numItemsLeftToLoad<=0&&this.onLoadComplete.call(this.onLoadContext,this.parameters)};b.prototype.onLoadJSON=function(){this.readyState===
-4&&(this.scope.parameters[this.parametersProperty]=JSON.parse(this.responseText),this.scope.handleLoadedItem())};b.prototype.onLoadImage=function(){this.scope.handleLoadedItem()};b.prototype.onLoadVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.handleLoadedItem()};b.prototype.onLoadGLSL=function(){if(this.readyState===4){for(var a="",b="",b=this.responseText.split("\n"),f="",e=0;e<b.length;e++)if(b[e].indexOf("//#")>-1)b[e].indexOf("Fragment")>-1&&(a=f,
-f="");else{var g=b[e];g.indexOf("//")>-1&&(g=g.substring(0,g.indexOf("//")));g.indexOf(";")===-1&&(g+="\n");f+=g}this.scope.parameters[this.parametersProperty]={fragmentShader:"#ifdef GL_ES\nprecision highp float;\n#endif\n"+f,vertexShader:a};this.scope.handleLoadedItem()}};b.prototype.onLoadError=function(a){GLOW.error("GLOW.Load.onLoadError: Error "+a.target.status)};b.prototype.parseThreeJS=function(a){var b={},f=a.scale!==void 0?1/a.scale:1;(function(e){if(a.version===void 0||a.version!=2)GLOW.error("Deprecated file format.");
-else{var f,h,i,j,k,l,m,o,n,r,p,q,s,t,u=a.faces;l=a.vertices;var v=a.normals,x=a.colors,w=0;for(f=0;f<a.uvs.length;f++)a.uvs[f].length&&w++;for(f=0;f<w;f++)b.faceUvs[f]=[],b.faceVertexUvs[f]=[];j=0;for(k=l.length;j<k;)m=new THREE.Vertex,m.position.x=l[j++]*e,m.position.y=l[j++]*e,m.position.z=l[j++]*e,b.vertices.push(m);j=0;for(k=u.length;j<k;){e=u[j++];l=e&1;i=e&2;f=e&4;h=e&8;o=e&16;m=e&32;r=e&64;e&=128;l?(p=new THREE.Face4,p.a=u[j++],p.b=u[j++],p.c=u[j++],p.d=u[j++],l=4):(p=new THREE.Face3,p.a=u[j++],
-p.b=u[j++],p.c=u[j++],l=3);if(i)i=u[j++],p.materials=b.materials[i];i=b.faces.length;if(f)for(f=0;f<w;f++)q=a.uvs[f],n=u[j++],t=q[n*2],n=q[n*2+1],b.faceUvs[f][i]=new THREE.UV(t,n);if(h)for(f=0;f<w;f++){q=a.uvs[f];s=[];for(h=0;h<l;h++)n=u[j++],t=q[n*2],n=q[n*2+1],s[h]=new THREE.UV(t,n);b.faceVertexUvs[f][i]=s}if(o)o=u[j++]*3,h=new THREE.Vector3,h.x=v[o++],h.y=v[o++],h.z=v[o],p.normal=h;if(m)for(f=0;f<l;f++)o=u[j++]*3,h=new THREE.Vector3,h.x=v[o++],h.y=v[o++],h.z=v[o],p.vertexNormals.push(h);if(r)m=
-u[j++],m=new THREE.Color(x[m]),p.color=m;if(e)for(f=0;f<l;f++)m=u[j++],m=new THREE.Color(x[m]),p.vertexColors.push(m);b.faces.push(p)}}})(f);(function(){var e,f,h,i;if(a.skinWeights){e=0;for(f=a.skinWeights.length;e<f;e+=2)h=a.skinWeights[e],i=a.skinWeights[e+1],b.skinWeights.push(new THREE.Vector4(h,i,0,0))}if(a.skinIndices){e=0;for(f=a.skinIndices.length;e<f;e+=2)h=a.skinIndices[e],i=a.skinIndices[e+1],b.skinIndices.push(new THREE.Vector4(h,i,0,0))}b.bones=a.bones;b.animation=a.animation})();(function(e){if(a.morphTargets!==
-void 0){var f,h,i,j,k,l,m,o,n;f=0;for(h=a.morphTargets.length;f<h;f++){b.morphTargets[f]={};b.morphTargets[f].name=a.morphTargets[f].name;b.morphTargets[f].vertices=[];o=b.morphTargets[f].vertices;n=a.morphTargets[f].vertices;i=0;for(j=n.length;i<j;i+=3)k=n[i]*e,l=n[i+1]*e,m=n[i+2]*e,o.push(new THREE.Vertex(new THREE.Vector3(k,l,m)))}}if(a.morphColors!==void 0){f=0;for(h=a.morphColors.length;f<h;f++){b.morphColors[f]={};b.morphColors[f].name=a.morphColors[f].name;b.morphColors[f].colors=[];j=b.morphColors[f].colors;
-k=a.morphColors[f].colors;e=0;for(i=k.length;e<i;e+=3)l=new THREE.Color(16755200),l.setRGB(k[e],k[e+1],k[e+2]),j.push(l)}}})(f);(function(){if(a.edges!==void 0){var e,f,h;for(e=0;e<a.edges.length;e+=2)f=a.edges[e],h=a.edges[e+1],b.edges.push(new THREE.Edge(b.vertices[f],b.vertices[h],f,h))}})()};return b}();
-GLOW.ShaderUtils={createMultiple:function(b,a){if(b.triangles===void 0||b.data===void 0)GLOW.error("GLOW.ShaderUtils.createMultiple: missing .data and/or .triangles in shader config object. Quitting.");else{var c,f=b.triangles,e=b.data,g,h=[],i,j,k,l,m,o,n=0,r=f.length;do{h.push(g={elements:[]});c=g.elements;for(k in a)if(e[k])g[k]=[];else{GLOW.error("GLOW.ShaderUtils.createMultiple: attribute "+d+" doesn't exist in originalShaderConfig.data. Quitting.");return}for(j=0;n<r;n+=3){if(j>65533){n-=3;
-break}c[j]=j++;c[j]=j++;c[j]=j++;for(k in a){i=e[k];size=a[k];for(o=0;o<3;o++){l=0;for(m=size;l<m;l++)g[k].push(i[f[n+o]*size+l])}}}}while(n<r);for(k in a)b.data[k]=h[0][k];b.triangles=h[0].elements;c=new GLOW.Shader(b);f=[c];for(n=1;n<h.length;n++){for(k in a)b.data[k]=h[n][k];e=GLOW.Compiler.createAttributes(GLOW.Compiler.extractAttributes(c.compiledData.program),b.data,b.usage,b.interleave);e=GLOW.Compiler.interleaveAttributes(e,b.interleave);for(l in e)h[n][l]=e[l];f[n]=c.clone(h[n])}return f}}};
-exports.GLOW = GLOW;
-
-},{}],6:[function(require,module,exports){
-var astw = require('astw');
-
-module.exports = function (src) {
-    var locals = {};
-    var implicit = {};
-    var exported = {};
-    
-    src = String(src).replace(/^#![^\n]*\n/, '');
-    var walk = astw(src);
-    
-    walk(function (node) {
-        if (node.type === 'VariableDeclaration') {
-            // take off the leading `var `
-            var id = getScope(node);
-            for (var i = 0; i < node.declarations.length; i++) {
-                var d = node.declarations[i];
-                locals[id][d.id.name] = d;
-            }
-        }
-        else if (isFunction(node)) {
-            var id = getScope(node.parent);
-            if (node.id) locals[id][node.id.name] = node;
-            var nid = node.params.length && getScope(node);
-            if (nid && !locals[nid]) locals[nid] = {};
-            for (var i = 0; i < node.params.length; i++) {
-                var p = node.params[i];
-                locals[nid][p.name] = p;
-            }
-        }
-    });
-    
-    walk(function (node) {
-        if (node.type === 'Identifier'
-        && lookup(node) === undefined) {
-            if (node.parent.type === 'Property'
-            && node.parent.key === node) return;
-            if (node.parent.type === 'MemberExpression'
-            && node.parent.property === node) return;
-            if (isFunction(node.parent)) return;
-            if (node.parent.type === 'LabeledStatement') return;
-            if (node.parent.type === 'ContinueStatement') return;
-            if (node.parent.type === 'BreakStatement') return;
-         
-            if (node.parent.type === 'AssignmentExpression') {
-                var isLeft0 = node.parent.left.type === 'MemberExpression'
-                    && node.parent.left.object === node.name
-                ;
-                var isLeft1 = node.parent.left.type === 'Identifier'
-                    && node.parent.left.name === node.name
-                ;
-                if (isLeft0 || isLeft1) {
-                    exported[node.name] = keyOf(node).length;
-                }
-            }
-            if (!exported[node.name]
-            || exported[node.name] < keyOf(node).length) {
-                implicit[node.name] = keyOf(node).length;
-            }
-        }
-    });
-    
-    var localScopes = {};
-    var lks = objectKeys(locals);
-    for (var i = 0; i < lks.length; i++) {
-        var key = lks[i];
-        localScopes[key] = objectKeys(locals[key]);
-    }
-    
-    return {
-        locals: localScopes,
-        globals: {
-            implicit: objectKeys(implicit),
-            exported: objectKeys(exported)
-        }
-    };
-    
-    function lookup (node) {
-        for (var p = node; p; p = p.parent) {
-            if (isFunction(p) || p.type === 'Program') {
-                var id = getScope(p);
-                if (locals[id][node.name]) {
-                    return id;
-                }
-            }
-        }
-        return undefined;
-    }
-    
-    function getScope (node) {
-        for (
-            var p = node;
-            !isFunction(p) && p.type !== 'Program';
-            p = p.parent
-        );
-        var id = idOf(p);
-        if (!locals[id]) locals[id] = {};
-        return id;
-    }
-    
-};
-
-function isFunction (x) {
-    return x.type === 'FunctionDeclaration'
-        || x.type === 'FunctionExpression'
-    ;
-}
-
-function idOf (node) {
-    var id = [];
-    for (var n = node; n.type !== 'Program'; n = n.parent) {
-        var key = keyOf(n).join('.');
-        id.unshift(key);
-    }
-    return id.join('.');
-}
-
-function keyOf (node) {
-    var p = node.parent;
-    var ks = objectKeys(p);
-    var kv = { keys : [], values : [], top : [] };
-    
-    for (var i = 0; i < ks.length; i++) {
-        var key = ks[i];
-        kv.keys.push(key);
-        kv.values.push(p[key]);
-        kv.top.push(undefined);
-        
-        if (isArray(p[key])) {
-            var keys = objectKeys(p[key]);
-            kv.keys.push.apply(kv.keys, keys);
-            kv.values.push.apply(kv.values, p[key]);
-            
-            var nkeys = [];
-            for (var j = 0; j < keys.length; j++) nkeys.push(key);
-            kv.top.push.apply(kv.top, nkeys);
-        }
-    }
-    var ix = indexOf(kv.values, node);
-    var res = [];
-    if (kv.top[ix]) res.push(kv.top[ix]);
-    if (kv.keys[ix]) res.push(kv.keys[ix]);
-    if (node.parent.type === 'CallExpression') {
-        res.unshift.apply(res, keyOf(node.parent.parent));
-    }
-    return res;
-}
-
-var isArray = Array.isArray || function (xs) {
-    return Object.prototype.toString.call(xs) === '[object Array]';
-};
-
-var objectKeys = Object.keys || function (obj) {
-    var keys = [];
-    for (var key in obj) keys.push(key);
-    return keys;
-};
-
-function indexOf (xs, x) {
-    if (xs.indexOf) return xs.indexOf(x);
-    for (var i = 0; i < xs.length; i++) {
-        if (x === xs[i]) return i;
-    }
-    return -1;
-}
-
-},{"astw":17}],9:[function(require,module,exports){
-"use strict"
-
-var hashInt       = require("hash-int")
-  , float2Int     = require("float-bits").toInt
-  , UINT_MAX      = 4294967295.0
-  , HASH_CONSTANT = 0x7997F879
-  , DOUBLE_VIEW   = new Float64Array(1)
-  , INT_VIEW      = new Uint32Array(DOUBLE_VIEW.buffer)
-
-function hashDouble(x, y) {
-  DOUBLE_VIEW[0] = +x
-  return hashInt(INT_VIEW[0] + hashInt(INT_VIEW[1]+y))
-}
-
-function noise1f(x) {
-  return (+(hashInt(float2Int(x)+HASH_CONSTANT)>>>0)) / UINT_MAX
-}
-
-function noise2f(x, y) {
-  return (+(hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT))>>>0)) / UINT_MAX
-}
-
-function noise3f(x,y,z) {
-  return (+(hashInt(float2Int(z)+hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT)))>>>0)) / UINT_MAX
-}
-
-function noise4f(x,y,z,t) {
-  return (+(hashInt(float2Int(t)+hashInt(float2Int(z)+hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT)))>>>0))) / UINT_MAX
-}
-
-function noiseNf() {
-  var n = arguments.length
-    , r = HASH_CONSTANT
-  for(var i=0; i<n; ++i) {
-    r = hashInt(r + float2Int(arguments[i]))
-  }
-  return (+r) / UINT_MAX
-}
-
-function noise1d(x) {
-  return +(hashDouble(x, HASH_CONSTANT)>>>0) / UINT_MAX
-}
-
-function noise2d(x, y) {
-  return +(hashDouble(y, hashDouble(x, HASH_CONSTANT))>>>0) / UINT_MAX
-}
-
-function noise3d(x, y, z) {
-  return +(hashDouble(z, hashDouble(y, hashDouble(x, HASH_CONSTANT)))>>>0) / UINT_MAX
-}
-
-function noise4d(x, y, z, t) {
-  return +(hashDouble(t, hashDouble(z, hashDouble(y, hashDouble(x, HASH_CONSTANT))))>>>0) / UINT_MAX
-}
-
-function noiseNd() {
-  var n = arguments.length
-    , r = HASH_CONSTANT
-  for(var i=0; i<n; ++i) {
-    r = hashDouble(arguments[i], r)
-  }
-  return +(r>>>0) / UINT_MAX
-}
-
-module.exports         = noiseNd
-module.exports.noise1d = noise1d
-module.exports.noise2d = noise2d
-module.exports.noise3d = noise3d
-module.exports.noise4d = noise4d
-module.exports.noiseNd = noiseNd
-module.exports.noise1f = noise1f
-module.exports.noise2f = noise2f
-module.exports.noise3f = noise3f
-module.exports.noise4f = noise4f
-module.exports.noiseNf = noiseNf
-
-},{"hash-int":18,"float-bits":19}],20:[function(require,module,exports){
-// shim for using process in browser
-
-var process = module.exports = {};
-
-process.nextTick = (function () {
-    var canSetImmediate = typeof window !== 'undefined'
-    && window.setImmediate;
-    var canPost = typeof window !== 'undefined'
-    && window.postMessage && window.addEventListener
-    ;
-
-    if (canSetImmediate) {
-        return function (f) { return window.setImmediate(f) };
-    }
-
-    if (canPost) {
-        var queue = [];
-        window.addEventListener('message', function (ev) {
-            if (ev.source === window && ev.data === 'process-tick') {
-                ev.stopPropagation();
-                if (queue.length > 0) {
-                    var fn = queue.shift();
-                    fn();
-                }
-            }
-        }, true);
-
-        return function nextTick(fn) {
-            queue.push(fn);
-            window.postMessage('process-tick', '*');
-        };
-    }
-
-    return function nextTick(fn) {
-        setTimeout(fn, 0);
-    };
-})();
-
-process.title = 'browser';
-process.browser = true;
-process.env = {};
-process.argv = [];
-
-process.binding = function (name) {
-    throw new Error('process.binding is not supported');
-}
-
-// TODO(shtylman)
-process.cwd = function () { return '/' };
-process.chdir = function (dir) {
-    throw new Error('process.chdir is not supported');
-};
-
-},{}],21:[function(require,module,exports){
-(function(process){if (!process.EventEmitter) process.EventEmitter = function () {};
-
-var EventEmitter = exports.EventEmitter = process.EventEmitter;
-var isArray = typeof Array.isArray === 'function'
-    ? Array.isArray
-    : function (xs) {
-        return Object.prototype.toString.call(xs) === '[object Array]'
-    }
-;
-function indexOf (xs, x) {
-    if (xs.indexOf) return xs.indexOf(x);
-    for (var i = 0; i < xs.length; i++) {
-        if (x === xs[i]) return i;
-    }
-    return -1;
-}
-
-// By default EventEmitters will print a warning if more than
-// 10 listeners are added to it. This is a useful default which
-// helps finding memory leaks.
-//
-// Obviously not all Emitters should be limited to 10. This function allows
-// that to be increased. Set to zero for unlimited.
-var defaultMaxListeners = 10;
-EventEmitter.prototype.setMaxListeners = function(n) {
-  if (!this._events) this._events = {};
-  this._events.maxListeners = n;
-};
-
-
-EventEmitter.prototype.emit = function(type) {
-  // If there is no 'error' event listener then throw.
-  if (type === 'error') {
-    if (!this._events || !this._events.error ||
-        (isArray(this._events.error) && !this._events.error.length))
-    {
-      if (arguments[1] instanceof Error) {
-        throw arguments[1]; // Unhandled 'error' event
-      } else {
-        throw new Error("Uncaught, unspecified 'error' event.");
-      }
-      return false;
-    }
-  }
-
-  if (!this._events) return false;
-  var handler = this._events[type];
-  if (!handler) return false;
-
-  if (typeof handler == 'function') {
-    switch (arguments.length) {
-      // fast cases
-      case 1:
-        handler.call(this);
-        break;
-      case 2:
-        handler.call(this, arguments[1]);
-        break;
-      case 3:
-        handler.call(this, arguments[1], arguments[2]);
-        break;
-      // slower
-      default:
-        var args = Array.prototype.slice.call(arguments, 1);
-        handler.apply(this, args);
-    }
-    return true;
-
-  } else if (isArray(handler)) {
-    var args = Array.prototype.slice.call(arguments, 1);
-
-    var listeners = handler.slice();
-    for (var i = 0, l = listeners.length; i < l; i++) {
-      listeners[i].apply(this, args);
-    }
-    return true;
-
-  } else {
-    return false;
-  }
-};
-
-// EventEmitter is defined in src/node_events.cc
-// EventEmitter.prototype.emit() is also defined there.
-EventEmitter.prototype.addListener = function(type, listener) {
-  if ('function' !== typeof listener) {
-    throw new Error('addListener only takes instances of Function');
-  }
-
-  if (!this._events) this._events = {};
-
-  // To avoid recursion in the case that type == "newListeners"! Before
-  // adding it to the listeners, first emit "newListeners".
-  this.emit('newListener', type, listener);
-
-  if (!this._events[type]) {
-    // Optimize the case of one listener. Don't need the extra array object.
-    this._events[type] = listener;
-  } else if (isArray(this._events[type])) {
-
-    // Check for listener leak
-    if (!this._events[type].warned) {
-      var m;
-      if (this._events.maxListeners !== undefined) {
-        m = this._events.maxListeners;
-      } else {
-        m = defaultMaxListeners;
-      }
-
-      if (m && m > 0 && this._events[type].length > m) {
-        this._events[type].warned = true;
-        console.error('(node) warning: possible EventEmitter memory ' +
-                      'leak detected. %d listeners added. ' +
-                      'Use emitter.setMaxListeners() to increase limit.',
-                      this._events[type].length);
-        console.trace();
-      }
-    }
-
-    // If we've already got an array, just append.
-    this._events[type].push(listener);
-  } else {
-    // Adding the second element, need to change to array.
-    this._events[type] = [this._events[type], listener];
-  }
-
-  return this;
-};
-
-EventEmitter.prototype.on = EventEmitter.prototype.addListener;
-
-EventEmitter.prototype.once = function(type, listener) {
-  var self = this;
-  self.on(type, function g() {
-    self.removeListener(type, g);
-    listener.apply(this, arguments);
-  });
-
-  return this;
-};
-
-EventEmitter.prototype.removeListener = function(type, listener) {
-  if ('function' !== typeof listener) {
-    throw new Error('removeListener only takes instances of Function');
-  }
-
-  // does not use listeners(), so no side effect of creating _events[type]
-  if (!this._events || !this._events[type]) return this;
-
-  var list = this._events[type];
-
-  if (isArray(list)) {
-    var i = indexOf(list, listener);
-    if (i < 0) return this;
-    list.splice(i, 1);
-    if (list.length == 0)
-      delete this._events[type];
-  } else if (this._events[type] === listener) {
-    delete this._events[type];
-  }
-
-  return this;
-};
-
-EventEmitter.prototype.removeAllListeners = function(type) {
-  if (arguments.length === 0) {
-    this._events = {};
-    return this;
-  }
-
-  // does not use listeners(), so no side effect of creating _events[type]
-  if (type && this._events && this._events[type]) this._events[type] = null;
-  return this;
-};
-
-EventEmitter.prototype.listeners = function(type) {
-  if (!this._events) this._events = {};
-  if (!this._events[type]) this._events[type] = [];
-  if (!isArray(this._events[type])) {
-    this._events[type] = [this._events[type]];
-  }
-  return this._events[type];
-};
-
-})(require("__browserify_process"))
-},{"__browserify_process":20}],18:[function(require,module,exports){
-"use strict"
-
-var A
-if(typeof Uint32Array === undefined) {
-  A = [ 0 ]
-} else {
-  A = new Uint32Array(1)
-}
-
-function hashInt(x) {
-  A[0]  = x|0
-  A[0] -= (A[0]<<6)
-  A[0] ^= (A[0]>>>17)
-  A[0] -= (A[0]<<9)
-  A[0] ^= (A[0]<<4)
-  A[0] -= (A[0]<<3)
-  A[0] ^= (A[0]<<10)
-  A[0] ^= (A[0]>>>15)
-  return A[0]
-}
-
-module.exports = hashInt
-
-},{}],19:[function(require,module,exports){
-"use strict"
-
-var FLOAT_VIEW  = new Float32Array(1)
-  , INT_VIEW    = new Int32Array(FLOAT_VIEW.buffer)
-  , UINT_VIEW   = new Uint32Array(FLOAT_VIEW.buffer)
-
-function floatToInt(x) {
-  FLOAT_VIEW[0] = x
-  return INT_VIEW[0]
-}
-
-function intToFloat(x) {
-  INT_VIEW[0] = x
-  return FLOAT_VIEW[0]
-}
-
-function floatToUint(x) {
-  FLOAT_VIEW[0] = x
-  return UINT_VIEW[0]
-}
-
-function uintToFloat(x) {
-  UINT_VIEW[0] = x
-  return FLOAT_VIEW[0]
-}
-
-module.exports = floatToInt
-module.exports.toInt = floatToInt
-module.exports.fromInt = intToFloat
-module.exports.toUint = floatToUint
-module.exports.fromUint = uintToFloat
-},{}],22:[function(require,module,exports){
-exports.flatten = function(arr) {
-  var result = new Array(arr.length * 3);
-  for(var i=0,j=0; i<arr.length; ++i, j+=3) {
-    var p = arr[i];
-    for(var k=0; k<3; ++k) {
-      result[j+k] = p[k];
-    }
-  }
-  return result;
-}
-
-function pushVert(result, p) {
-  for(var k=0; k<3; ++k) {
-    result.push(p[k]);
-  }
-}
-
-exports.elementLen = function(faces) {
-  var count = 0;
-  for(var i=0; i<faces.length; ++i) {
-    count += faces[i].length - 2;
-  }
-  return count;
-}
-
-exports.flattenFaces = function(faces, arr) {
-  var result = [];
-  for(var i=0; i<faces.length; ++i) {
-    var f = faces[i];
-    for(var j=2; j<f.length; ++j) {
-      pushVert(result, arr[f[0]]);
-      pushVert(result, arr[f[j-1]]);
-      pushVert(result, arr[f[j]]);
-    }
-  }
-  return result;
-}
-
-exports.flattenPerFace = function(faces, arr) {
-  var result = [];
-  for(var i=0; i<faces.length; ++i) {
-    var f = faces[i];
-    for(var j=2; j<f.length; ++j) {
-      pushVert(result, arr[i]);
-      pushVert(result, arr[i]);
-      pushVert(result, arr[i]);
-    }
-  }
-  return result;
-}
-
-var nextFrame = (function(){
-    return  window.requestAnimationFrame       ||
-            window.webkitRequestAnimationFrame || 
-            window.mozRequestAnimationFrame    || 
-            window.oRequestAnimationFrame      || 
-            window.msRequestAnimationFrame     || 
-            function( callback ){
-              window.setTimeout(callback, 1000 / 60);
-            };
-  })();
-
-exports.nextFrame = function(f) { nextFrame(f); };
-
-exports.printVec3 = function(vec) {
-  return "vec3(" + vec[0] + "," + vec[1] + "," + vec[2] + ")";
-}
-},{}],17:[function(require,module,exports){
-var parse = require('esprima').parse;
-
-module.exports = function (src) {
-    var ast = typeof src === 'string' ? parse(src) : src;
-    return function (cb) {
-        walk(ast, undefined, cb);
-    };
-};
-
-function walk (node, parent, cb) {
-    var keys = objectKeys(node);
-    for (var i = 0; i < keys.length; i++) {
-        var key = keys[i];
-        if (key === 'parent') continue;
-        
-        var child = node[key];
-        if (isArray(child)) {
-            for (var j = 0; j < child.length; j++) {
-                var c = child[j];
-                if (c && typeof c.type === 'string') {
-                    c.parent = node;
-                    walk(c, node, cb);
-                }
-            }
-        }
-        else if (child && typeof child.type === 'string') {
-            child.parent = node;
-            walk(child, node, cb);
-        }
-    }
-    cb(node);
-}
-
-var isArray = Array.isArray || function (xs) {
-    return Object.prototype.toString.call(xs) === '[object Array]';
-};
-
-var objectKeys = Object.keys || function (obj) {
-    var keys = [];
-    for (var key in obj) keys.push(key);
-    return keys;
-};
-
-},{"esprima":23}],15:[function(require,module,exports){
-//Import libraries
-var $             = require('jquery-browserify')
-  , GLOW          = require('./GLOW.js').GLOW
-  , ArcballCamera = require('arcball').ArcballCamera
-  , utils         = require('./utils.js')
-  , EventEmitter  = require('events').EventEmitter;
-
-exports.makeShell = function(params) {
-  if(!params) {
-    params = {};
-  }
-  var shell = {};
-  var bg_color    = params.bg_color   || [ 0.3, 0.5, 0.87 ]
-    , camera_pos  = params.camera_pos || [ 0, 0, 50 ]
-    , container   = params.container  || "#container";
-
-  //Create event emitter
-  shell.events = new EventEmitter();
-
-  //Initialize GLOW
-  shell.context = new GLOW.Context();
-  if(!shell.context.enableExtension("OES_texture_float")) {
-    throw new Exception("No support for float textures");
-  }
-  shell.context.setupClear({
-      red:    bg_color[0]
-    , green:  bg_color[1]
-    , blue:   bg_color[2]
-  });
-  GLOW.defaultCamera.localMatrix.setPosition(
-      camera_pos[0]
-    , camera_pos[1]
-    , camera_pos[2]
-  );
-  GLOW.defaultCamera.update();
-  
-  //Create arcball camera
-  shell.camera = new ArcballCamera();
-  shell.buttons = {
-      rotate: false
-    , pan: false
-    , zoom: false
-  };
-  
-  //Hook up controls
-  var buttons = shell.buttons;
-  shell.container = container;
-  $(container)[0].appendChild( shell.context.domElement );
-  $(container).mousemove(function(e) {
-    var c = $(container);
-    shell.camera.update(e.pageX/c.width()-0.5, e.pageY/c.height()-0.5, {
-      rotate: buttons.rotate || !(e.ctrlKey || e.shiftKey) && (e.which === 1),
-      pan:    buttons.pan    || (e.ctrlKey && e.which !== 0) || (e.which === 2),
-      zoom:   buttons.zoom   || (e.shiftlKey && e.which !== 0) || e.which === 3
-    })
-  });
-  $(document).keydown(function(e) {
-    if(e.keyCode === 65) {
-      buttons.rotate = true;
-    }
-    if(e.keyCode === 83) {
-      buttons.pan = true;
-    }
-    if(e.keyCode === 68) {
-      buttons.zoom = true;
-    }
-  });
-  $(document).keyup(function(e) {
-    if(e.keyCode === 65) {
-      buttons.rotate = false;
-    }
-    if(e.keyCode === 83) {
-      buttons.pan = false;
-    }
-    if(e.keyCode === 68) {
-      buttons.zoom = false;
-    }
-  });
-  
-  //Render loop
-  function render() {
-    shell.context.cache.clear();
-    shell.context.enableDepthTest(true);
-    if(params.cullCW) {
-      shell.context.enableCulling(true, {frontFace: GL.CW, cullFace: GL.BACK});
-    } else if(params.cullCCW) {
-      shell.context.enableCulling(true, {frontFace: GL.CCW, cullFace: GL.BACK});
-    } else {
-      shell.context.enableCulling(false);
-    }
-    shell.context.clear();
-  
-    shell.events.emit("render");
-    
-    utils.nextFrame(render);
-  }
-  
-  render();
-  
-  return shell;
-}
-
-},{"events":21,"./GLOW.js":14,"./utils.js":22,"jquery-browserify":24,"arcball":25}],16:[function(require,module,exports){
-//Simple mesh viewer
-var $             = require("jquery-browserify")
-  , GLOW          = require("./GLOW.js").GLOW
-  , utils         = require("./utils.js")
-  , normals       = require("normals");
-
-var vertexNormals = normals.vertexNormals;
-var faceNormals = normals.faceNormals;
-
-exports.makeViewer = function(params) {
-
-  if(!params) {
-    params = {};
-  }
-  var shell = require("./shell.js").makeShell(params);
-  
-  shell.params = params;
-  
-  if(!params.lightPosition) {
-    params.lightPosition = [100,100,100];
-  }
-
-  var shaderInfo = {
-    vertexShader: [
-      "uniform     mat4     transform;",
-      "uniform     mat4     cameraInverse;",
-      "uniform     mat4     cameraProjection;",
-      
-      "attribute  vec3      position;",
-      "attribute  vec3      color;",
-      "attribute  vec3      normal;",
-      
-      "varying    vec3      eyeDir;",
-      "varying    vec3      f_color;",
-      "varying    vec3      f_normal;",
-      "varying    vec3      f_position;",
-      
-      "void main(void) {",
-        "vec4 t_position = transform * vec4( position, 1.0 );",
-        "gl_Position = cameraProjection * cameraInverse * t_position;",
-        "eyeDir = normalize(t_position.xyz);",
-        "f_color = color;",
-        "f_normal = normal;",
-        "f_position = position;",
-      "}"
-    ].join("\n"),
-    fragmentShader: [
-      "#ifdef GL_ES",
-        "precision highp float;",
-      "#endif",
-      
-      "uniform    vec3  lightPosition;",
-      "uniform    float     ambientPower;",
-      "uniform    float     diffusePower;",
-      "uniform    float     specularPower;",
-      
-      "varying    vec3      eyeDir;",
-      "varying    vec3      f_color;",
-      "varying    vec3      f_normal;",
-      "varying    vec3      f_position;",
-      
-      "void main() {",
-      
-        "vec3 lightDir = normalize(lightPosition - f_position);",
-
-        "float diffuse = clamp(dot(lightDir, f_normal), 0.0, 1.0);",
-        "float specular = clamp(dot(f_normal, normalize(lightDir + eyeDir)), 0.0, 1.0);",
-        "specular = pow(specular, 32.0);",
-        "float intensity = ambientPower + diffusePower * diffuse + specularPower * specular;",
-        
-        "gl_FragColor = vec4(intensity * f_color, 1.0);",
-      "}"
-    ].join("\n"),
-    data: {
-      transform:        new GLOW.Matrix4(),
-      cameraInverse:    GLOW.defaultCamera.inverse,
-      cameraProjection: GLOW.defaultCamera.projection,
-      position:         new Float32Array([0,0,0,1,0,0,0,1,0]),
-      color:            new Float32Array([0,0,1,1,0,0,0,1,0]),
-      normal:           new Float32Array([0,0,1,0,0,1,0,0,1]),
-      lightPosition:    new GLOW.Vector3(params.lightPosition[0], params.lightPosition[1], params.lightPosition[2]),
-      ambientPower:     new GLOW.Float(0.4),
-      diffusePower:     new GLOW.Float(0.6),
-      specularPower:    new GLOW.Float(0.5)
-    },
-    interleave: {
-      position: false,
-      normal:   false,
-      color:    false
-    },
-    primitives: GL.TRIANGLES,
-    usage:     GL.DYNAMIC_DRAW
-  };
-  
-  
-  var wireInfo = {
-    vertexShader: [
-      "uniform     mat4     transform;",
-      "uniform     mat4     cameraInverse;",
-      "uniform     mat4     cameraProjection;",
-      
-      "attribute  vec3      position;",
-      
-      "void main(void) {",
-        "vec4 t_position = transform * vec4( position, 1.0 );",
-        "gl_Position = cameraProjection * cameraInverse * t_position;",
-      "}"
-    ].join("\n"),
-    fragmentShader: [
-      "#ifdef GL_ES",
-        "precision highp float;",
-      "#endif",
-      
-      "void main() {",
-        "gl_FragColor = vec4(0, 0, 0, 1);",
-      "}"
-    ].join("\n"),
-    data: {
-      transform:        new GLOW.Matrix4(),
-      cameraInverse:    GLOW.defaultCamera.inverse,
-      cameraProjection: GLOW.defaultCamera.projection,
-      position:         new Float32Array([0,0,0,1,0,0]),
-    },
-    interleave: {
-      position: false,
-    },
-    primitives: GL.LINES,
-    usage:     GL.DYNAMIC_DRAW
-  };
-  
-  shell.shader = new GLOW.Shader(shaderInfo);
-  shell.wireShader = new GLOW.Shader(wireInfo);
-  
-  //Update mesh
-  shell.updateMesh = function(params) {
-
-    if(params.packed) {
-      shell.shader.normal.bufferData(params.normals)
-      shell.shader.color.bufferData(params.colors)
-      shell.shader.position.bufferData(params.positions)
-      shell.shader.elements.length = (params.positions.length / 3)|0
-      return
-    }
-    
-    var faces = params.faces || params.cells
-    
-    //Update normals
-    if(shell.params.flatShaded) {
-      var normals = params.faceNormals || faceNormals(faces, params.positions);
-      shell.shader.normal.bufferData(new Float32Array(utils.flattenPerFace(faces, normals)));
-    } else {
-      var normals = params.vertexNormals || vertexNormals(faces, params.positions);
-      shell.shader.normal.bufferData(new Float32Array(utils.flattenFaces(faces, normals)));
-    }
-    
-    //Update colors
-    if(params.colors) {
-      shell.shader.color.bufferData(new Float32Array(utils.flattenFaces(faces, params.colors)));
-    } else if(params.faceColors) {
-      shell.shader.color.bufferData(new Float32Array(utils.flattenPerFace(faces, params.faceColors)));
-    } else {
-      for(var i=0; i<normals.length; ++i) {
-        for(var j=0; j<3; ++j) {
-          normals[i][j] = 0.5 * normals[i][j] + 0.5;
-        }
-      }
-      if(shell.params.flatShaded) {
-        shell.shader.color.bufferData(new Float32Array(utils.flattenPerFace(faces, normals)));
-      } else {
-        shell.shader.color.bufferData(new Float32Array(utils.flattenFaces(faces, normals)));
-      }
-    }
-    
-    //Update buffer data
-    shell.shader.position.bufferData(new Float32Array(utils.flattenFaces(faces, params.positions)), GL.DYNAMIC_DRAW);
-    
-    shell.shader.elements.length = 3*utils.elementLen(faces);
-    
-    if(shell.params.wireframe) {
-      var wire_pos = [];
-      for(var i=0; i<faces.length; ++i) {
-        var f = faces[i];
-        for(var j=0; j<f.length; ++j) {
-          wire_pos.push(params.positions[f[j]]);
-          wire_pos.push(params.positions[f[(j+1)%f.length]]);
-        }
-      }
-      shell.wireShader.position.bufferData(new Float32Array(utils.flatten(wire_pos)));
-      shell.wireShader.elements.length = wire_pos.length;
-    }
-  }
-
-  //Draw mesh
-  shell.events.on('render', function() {
-    var matrix = shell.camera.matrix()
-      , xform0  = shell.shader.transform
-      , xform1  = shell.wireShader.transform;
-    for(var i=0; i<4; ++i) {
-      for(var j=0; j<4; ++j) {
-        var ptr = i+4*j;
-        xform0.value[ptr] = xform1.value[ptr] = matrix[i][j];
-      }
-    }
-    shell.shader.draw();
-    if(shell.params.wireframe) {
-      GL.lineWidth(2.0);
-      shell.wireShader.draw();
-    }
-  });
-
-  return shell;
-}
-
-},{"./GLOW.js":14,"./utils.js":22,"./shell.js":15,"jquery-browserify":24,"normals":26}],24:[function(require,module,exports){
 (function(){// Uses Node, AMD or browser globals to create a module.
 
 // If you want something that will work in other stricter CommonJS environments,
@@ -17722,7 +15817,1598 @@ return jQuery;
 })( window ); }));
 
 })()
-},{}],25:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
+exports.surfaceNets         = require("./lib/surfacenets.js").surfaceNets;
+exports.marchingCubes       = require("./lib/marchingcubes.js").marchingCubes;
+exports.marchingTetrahedra  = require("./lib/marchingtetrahedra.js").marchingTetrahedra;
+
+},{"./lib/surfacenets.js":12,"./lib/marchingcubes.js":13,"./lib/marchingtetrahedra.js":14}],7:[function(require,module,exports){
+exports.GLOW        = require("./GLOW.js").GLOW;
+exports.makeShell   = require("./shell.js").makeShell;
+exports.makeViewer  = require("./viewer.js").makeViewer;
+
+},{"./GLOW.js":15,"./shell.js":16,"./viewer.js":17}],12:[function(require,module,exports){
+/**
+ * SurfaceNets in JavaScript
+ *
+ * Written by Mikola Lysenko (C) 2012
+ *
+ * MIT License
+ *
+ * Based on: S.F. Gibson, "Constrained Elastic Surface Nets". (1998) MERL Tech Report.
+ */
+"use strict";
+
+//Precompute edge table, like Paul Bourke does.
+// This saves a bit of time when computing the centroid of each boundary cell
+var cube_edges = new Int32Array(24)
+  , edge_table = new Int32Array(256);
+(function() {
+
+  //Initialize the cube_edges table
+  // This is just the vertex number of each cube
+  var k = 0;
+  for(var i=0; i<8; ++i) {
+    for(var j=1; j<=4; j<<=1) {
+      var p = i^j;
+      if(i <= p) {
+        cube_edges[k++] = i;
+        cube_edges[k++] = p;
+      }
+    }
+  }
+
+  //Initialize the intersection table.
+  //  This is a 2^(cube configuration) ->  2^(edge configuration) map
+  //  There is one entry for each possible cube configuration, and the output is a 12-bit vector enumerating all edges crossing the 0-level.
+  for(var i=0; i<256; ++i) {
+    var em = 0;
+    for(var j=0; j<24; j+=2) {
+      var a = !!(i & (1<<cube_edges[j]))
+        , b = !!(i & (1<<cube_edges[j+1]));
+      em |= a !== b ? (1 << (j >> 1)) : 0;
+    }
+    edge_table[i] = em;
+  }
+})();
+
+//Internal buffer, this may get resized at run time
+var buffer = new Array(4096);
+(function() {
+  for(var i=0; i<buffer.length; ++i) {
+    buffer[i] = 0;
+  }
+})();
+
+exports.surfaceNets = function(dims, potential, bounds) {
+  if(!bounds) {
+    bounds = [[0,0,0],dims];
+  }
+  
+  var scale     = [0,0,0];
+  var shift     = [0,0,0];
+  for(var i=0; i<3; ++i) {
+    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
+    shift[i] = bounds[0][i];
+  }
+  
+  var vertices = []
+    , faces = []
+    , n = 0
+    , x = [0, 0, 0]
+    , R = [1, (dims[0]+1), (dims[0]+1)*(dims[1]+1)]
+    , grid = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    , buf_no = 1;
+  
+   
+  //Resize buffer if necessary 
+  if(R[2] * 2 > buffer.length) {
+    var ol = buffer.length;
+    buffer.length = R[2] * 2;
+    while(ol < buffer.length) {
+      buffer[ol++] = 0;
+    }
+  }
+  
+  //March over the voxel grid
+  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0], buf_no ^= 1, R[2]=-R[2]) {
+  
+    //m is the pointer into the buffer we are going to use.  
+    //This is slightly obtuse because javascript does not have good support for packed data structures, so we must use typed arrays :(
+    //The contents of the buffer will be the indices of the vertices on the previous x/y slice of the volume
+    var m = 1 + (dims[0]+1) * (1 + buf_no * (dims[1]+1));
+    
+    for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n, m+=2)
+    for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n, ++m) {
+    
+      //Read in 8 field values around this vertex and store them in an array
+      //Also calculate 8-bit mask, like in marching cubes, so we can speed up sign checks later
+      var mask = 0, g = 0;
+      for(var k=0; k<2; ++k)
+      for(var j=0; j<2; ++j)      
+      for(var i=0; i<2; ++i, ++g) {
+        var p = potential(
+          scale[0]*(x[0]+i)+shift[0],
+          scale[1]*(x[1]+j)+shift[1],
+          scale[2]*(x[2]+k)+shift[2]);
+        grid[g] = p;
+        mask |= (p < 0) ? (1<<g) : 0;
+      }
+      
+      //Check for early termination if cell does not intersect boundary
+      if(mask === 0 || mask === 0xff) {
+        continue;
+      }
+      
+      //Sum up edge intersections
+      var edge_mask = edge_table[mask]
+        , v = [0.0,0.0,0.0]
+        , e_count = 0;
+        
+      //For every edge of the cube...
+      for(var i=0; i<12; ++i) {
+      
+        //Use edge mask to check if it is crossed
+        if(!(edge_mask & (1<<i))) {
+          continue;
+        }
+        
+        //If it did, increment number of edge crossings
+        ++e_count;
+        
+        //Now find the point of intersection
+        var e0 = cube_edges[ i<<1 ]       //Unpack vertices
+          , e1 = cube_edges[(i<<1)+1]
+          , g0 = grid[e0]                 //Unpack grid values
+          , g1 = grid[e1]
+          , t  = g0 - g1;                 //Compute point of intersection
+        if(Math.abs(t) > 1e-6) {
+          t = g0 / t;
+        } else {
+          continue;
+        }
+        
+        //Interpolate vertices and add up intersections (this can be done without multiplying)
+        for(var j=0, k=1; j<3; ++j, k<<=1) {
+          var a = e0 & k
+            , b = e1 & k;
+          if(a !== b) {
+            v[j] += a ? 1.0 - t : t;
+          } else {
+            v[j] += a ? 1.0 : 0;
+          }
+        }
+      }
+      
+      //Now we just average the edge intersections and add them to coordinate
+      var s = 1.0 / e_count;
+      for(var i=0; i<3; ++i) {
+        v[i] = scale[i] * (x[i] + s * v[i]) + shift[i];
+      }
+      
+      //Add vertex to buffer, store pointer to vertex index in buffer
+      buffer[m] = vertices.length;
+      vertices.push(v);
+      
+      //Now we need to add faces together, to do this we just loop over 3 basis components
+      for(var i=0; i<3; ++i) {
+        //The first three entries of the edge_mask count the crossings along the edge
+        if(!(edge_mask & (1<<i)) ) {
+          continue;
+        }
+        
+        // i = axes we are point along.  iu, iv = orthogonal axes
+        var iu = (i+1)%3
+          , iv = (i+2)%3;
+          
+        //If we are on a boundary, skip it
+        if(x[iu] === 0 || x[iv] === 0) {
+          continue;
+        }
+        
+        //Otherwise, look up adjacent edges in buffer
+        var du = R[iu]
+          , dv = R[iv];
+        
+        //Remember to flip orientation depending on the sign of the corner.
+        if(mask & 1) {
+          faces.push([buffer[m],    buffer[m-du],    buffer[m-dv]]);
+          faces.push([buffer[m-dv], buffer[m-du],    buffer[m-du-dv]]);
+        } else {
+          faces.push([buffer[m],    buffer[m-dv],    buffer[m-du]]);
+          faces.push([buffer[m-du], buffer[m-dv],    buffer[m-du-dv]]);
+        }
+      }
+    }
+  }
+  
+  //All done!  Return the result
+  return { positions: vertices, cells: faces };
+};
+
+},{}],13:[function(require,module,exports){
+/**
+ * Javascript Marching Cubes
+ *
+ * Based on Paul Bourke's classic implementation:
+ *    http://local.wasp.uwa.edu.au/~pbourke/geometry/polygonise/
+ *
+ * JS port by Mikola Lysenko
+ */
+
+var edgeTable= new Uint32Array([
+      0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+      0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+      0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+      0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+      0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+      0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+      0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+      0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+      0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+      0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+      0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+      0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+      0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+      0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+      0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+      0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+      0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+      0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+      0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+      0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+      0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+      0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+      0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+      0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+      0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+      0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+      0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+      0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+      0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+      0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+      0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+      0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   ])
+  , triTable = [
+      [],
+      [0, 8, 3],
+      [0, 1, 9],
+      [1, 8, 3, 9, 8, 1],
+      [1, 2, 10],
+      [0, 8, 3, 1, 2, 10],
+      [9, 2, 10, 0, 2, 9],
+      [2, 8, 3, 2, 10, 8, 10, 9, 8],
+      [3, 11, 2],
+      [0, 11, 2, 8, 11, 0],
+      [1, 9, 0, 2, 3, 11],
+      [1, 11, 2, 1, 9, 11, 9, 8, 11],
+      [3, 10, 1, 11, 10, 3],
+      [0, 10, 1, 0, 8, 10, 8, 11, 10],
+      [3, 9, 0, 3, 11, 9, 11, 10, 9],
+      [9, 8, 10, 10, 8, 11],
+      [4, 7, 8],
+      [4, 3, 0, 7, 3, 4],
+      [0, 1, 9, 8, 4, 7],
+      [4, 1, 9, 4, 7, 1, 7, 3, 1],
+      [1, 2, 10, 8, 4, 7],
+      [3, 4, 7, 3, 0, 4, 1, 2, 10],
+      [9, 2, 10, 9, 0, 2, 8, 4, 7],
+      [2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4],
+      [8, 4, 7, 3, 11, 2],
+      [11, 4, 7, 11, 2, 4, 2, 0, 4],
+      [9, 0, 1, 8, 4, 7, 2, 3, 11],
+      [4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1],
+      [3, 10, 1, 3, 11, 10, 7, 8, 4],
+      [1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4],
+      [4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3],
+      [4, 7, 11, 4, 11, 9, 9, 11, 10],
+      [9, 5, 4],
+      [9, 5, 4, 0, 8, 3],
+      [0, 5, 4, 1, 5, 0],
+      [8, 5, 4, 8, 3, 5, 3, 1, 5],
+      [1, 2, 10, 9, 5, 4],
+      [3, 0, 8, 1, 2, 10, 4, 9, 5],
+      [5, 2, 10, 5, 4, 2, 4, 0, 2],
+      [2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8],
+      [9, 5, 4, 2, 3, 11],
+      [0, 11, 2, 0, 8, 11, 4, 9, 5],
+      [0, 5, 4, 0, 1, 5, 2, 3, 11],
+      [2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5],
+      [10, 3, 11, 10, 1, 3, 9, 5, 4],
+      [4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10],
+      [5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3],
+      [5, 4, 8, 5, 8, 10, 10, 8, 11],
+      [9, 7, 8, 5, 7, 9],
+      [9, 3, 0, 9, 5, 3, 5, 7, 3],
+      [0, 7, 8, 0, 1, 7, 1, 5, 7],
+      [1, 5, 3, 3, 5, 7],
+      [9, 7, 8, 9, 5, 7, 10, 1, 2],
+      [10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3],
+      [8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2],
+      [2, 10, 5, 2, 5, 3, 3, 5, 7],
+      [7, 9, 5, 7, 8, 9, 3, 11, 2],
+      [9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11],
+      [2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7],
+      [11, 2, 1, 11, 1, 7, 7, 1, 5],
+      [9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11],
+      [5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0],
+      [11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0],
+      [11, 10, 5, 7, 11, 5],
+      [10, 6, 5],
+      [0, 8, 3, 5, 10, 6],
+      [9, 0, 1, 5, 10, 6],
+      [1, 8, 3, 1, 9, 8, 5, 10, 6],
+      [1, 6, 5, 2, 6, 1],
+      [1, 6, 5, 1, 2, 6, 3, 0, 8],
+      [9, 6, 5, 9, 0, 6, 0, 2, 6],
+      [5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8],
+      [2, 3, 11, 10, 6, 5],
+      [11, 0, 8, 11, 2, 0, 10, 6, 5],
+      [0, 1, 9, 2, 3, 11, 5, 10, 6],
+      [5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11],
+      [6, 3, 11, 6, 5, 3, 5, 1, 3],
+      [0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6],
+      [3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9],
+      [6, 5, 9, 6, 9, 11, 11, 9, 8],
+      [5, 10, 6, 4, 7, 8],
+      [4, 3, 0, 4, 7, 3, 6, 5, 10],
+      [1, 9, 0, 5, 10, 6, 8, 4, 7],
+      [10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4],
+      [6, 1, 2, 6, 5, 1, 4, 7, 8],
+      [1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7],
+      [8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6],
+      [7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9],
+      [3, 11, 2, 7, 8, 4, 10, 6, 5],
+      [5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11],
+      [0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6],
+      [9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6],
+      [8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6],
+      [5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11],
+      [0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7],
+      [6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9],
+      [10, 4, 9, 6, 4, 10],
+      [4, 10, 6, 4, 9, 10, 0, 8, 3],
+      [10, 0, 1, 10, 6, 0, 6, 4, 0],
+      [8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10],
+      [1, 4, 9, 1, 2, 4, 2, 6, 4],
+      [3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4],
+      [0, 2, 4, 4, 2, 6],
+      [8, 3, 2, 8, 2, 4, 4, 2, 6],
+      [10, 4, 9, 10, 6, 4, 11, 2, 3],
+      [0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6],
+      [3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10],
+      [6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1],
+      [9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3],
+      [8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1],
+      [3, 11, 6, 3, 6, 0, 0, 6, 4],
+      [6, 4, 8, 11, 6, 8],
+      [7, 10, 6, 7, 8, 10, 8, 9, 10],
+      [0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10],
+      [10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0],
+      [10, 6, 7, 10, 7, 1, 1, 7, 3],
+      [1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7],
+      [2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9],
+      [7, 8, 0, 7, 0, 6, 6, 0, 2],
+      [7, 3, 2, 6, 7, 2],
+      [2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7],
+      [2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7],
+      [1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11],
+      [11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1],
+      [8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6],
+      [0, 9, 1, 11, 6, 7],
+      [7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0],
+      [7, 11, 6],
+      [7, 6, 11],
+      [3, 0, 8, 11, 7, 6],
+      [0, 1, 9, 11, 7, 6],
+      [8, 1, 9, 8, 3, 1, 11, 7, 6],
+      [10, 1, 2, 6, 11, 7],
+      [1, 2, 10, 3, 0, 8, 6, 11, 7],
+      [2, 9, 0, 2, 10, 9, 6, 11, 7],
+      [6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8],
+      [7, 2, 3, 6, 2, 7],
+      [7, 0, 8, 7, 6, 0, 6, 2, 0],
+      [2, 7, 6, 2, 3, 7, 0, 1, 9],
+      [1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6],
+      [10, 7, 6, 10, 1, 7, 1, 3, 7],
+      [10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8],
+      [0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7],
+      [7, 6, 10, 7, 10, 8, 8, 10, 9],
+      [6, 8, 4, 11, 8, 6],
+      [3, 6, 11, 3, 0, 6, 0, 4, 6],
+      [8, 6, 11, 8, 4, 6, 9, 0, 1],
+      [9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6],
+      [6, 8, 4, 6, 11, 8, 2, 10, 1],
+      [1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6],
+      [4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9],
+      [10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3],
+      [8, 2, 3, 8, 4, 2, 4, 6, 2],
+      [0, 4, 2, 4, 6, 2],
+      [1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8],
+      [1, 9, 4, 1, 4, 2, 2, 4, 6],
+      [8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1],
+      [10, 1, 0, 10, 0, 6, 6, 0, 4],
+      [4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3],
+      [10, 9, 4, 6, 10, 4],
+      [4, 9, 5, 7, 6, 11],
+      [0, 8, 3, 4, 9, 5, 11, 7, 6],
+      [5, 0, 1, 5, 4, 0, 7, 6, 11],
+      [11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5],
+      [9, 5, 4, 10, 1, 2, 7, 6, 11],
+      [6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5],
+      [7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2],
+      [3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6],
+      [7, 2, 3, 7, 6, 2, 5, 4, 9],
+      [9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7],
+      [3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0],
+      [6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8],
+      [9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7],
+      [1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4],
+      [4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10],
+      [7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10],
+      [6, 9, 5, 6, 11, 9, 11, 8, 9],
+      [3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5],
+      [0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11],
+      [6, 11, 3, 6, 3, 5, 5, 3, 1],
+      [1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6],
+      [0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10],
+      [11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5],
+      [6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3],
+      [5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2],
+      [9, 5, 6, 9, 6, 0, 0, 6, 2],
+      [1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8],
+      [1, 5, 6, 2, 1, 6],
+      [1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6],
+      [10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0],
+      [0, 3, 8, 5, 6, 10],
+      [10, 5, 6],
+      [11, 5, 10, 7, 5, 11],
+      [11, 5, 10, 11, 7, 5, 8, 3, 0],
+      [5, 11, 7, 5, 10, 11, 1, 9, 0],
+      [10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1],
+      [11, 1, 2, 11, 7, 1, 7, 5, 1],
+      [0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11],
+      [9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7],
+      [7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2],
+      [2, 5, 10, 2, 3, 5, 3, 7, 5],
+      [8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5],
+      [9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2],
+      [9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2],
+      [1, 3, 5, 3, 7, 5],
+      [0, 8, 7, 0, 7, 1, 1, 7, 5],
+      [9, 0, 3, 9, 3, 5, 5, 3, 7],
+      [9, 8, 7, 5, 9, 7],
+      [5, 8, 4, 5, 10, 8, 10, 11, 8],
+      [5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0],
+      [0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5],
+      [10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4],
+      [2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8],
+      [0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11],
+      [0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5],
+      [9, 4, 5, 2, 11, 3],
+      [2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4],
+      [5, 10, 2, 5, 2, 4, 4, 2, 0],
+      [3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9],
+      [5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2],
+      [8, 4, 5, 8, 5, 3, 3, 5, 1],
+      [0, 4, 5, 1, 0, 5],
+      [8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5],
+      [9, 4, 5],
+      [4, 11, 7, 4, 9, 11, 9, 10, 11],
+      [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11],
+      [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11],
+      [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4],
+      [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2],
+      [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3],
+      [11, 7, 4, 11, 4, 2, 2, 4, 0],
+      [11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4],
+      [2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9],
+      [9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7],
+      [3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10],
+      [1, 10, 2, 8, 7, 4],
+      [4, 9, 1, 4, 1, 7, 7, 1, 3],
+      [4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1],
+      [4, 0, 3, 7, 4, 3],
+      [4, 8, 7],
+      [9, 10, 8, 10, 11, 8],
+      [3, 0, 9, 3, 9, 11, 11, 9, 10],
+      [0, 1, 10, 0, 10, 8, 8, 10, 11],
+      [3, 1, 10, 11, 3, 10],
+      [1, 2, 11, 1, 11, 9, 9, 11, 8],
+      [3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9],
+      [0, 2, 11, 8, 0, 11],
+      [3, 2, 11],
+      [2, 3, 8, 2, 8, 10, 10, 8, 9],
+      [9, 10, 2, 0, 9, 2],
+      [2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8],
+      [1, 10, 2],
+      [1, 3, 8, 9, 1, 8],
+      [0, 9, 1],
+      [0, 3, 8],
+      []]
+  , cubeVerts = [
+     [0,0,0]
+    ,[1,0,0]
+    ,[1,1,0]
+    ,[0,1,0]
+    ,[0,0,1]
+    ,[1,0,1]
+    ,[1,1,1]
+    ,[0,1,1]]
+  , edgeIndex = [ [0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7] ];
+
+
+
+exports.marchingCubes = function(dims, potential, bounds) {
+  if(!bounds) {
+    bounds = [[0,0,0], dims];
+  }
+  var scale     = [0,0,0];
+  var shift     = [0,0,0];
+  for(var i=0; i<3; ++i) {
+    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
+    shift[i] = bounds[0][i];
+  }
+
+  var vertices = []
+    , faces = []
+    , n = 0
+    , grid = new Array(8)
+    , edges = new Array(12)
+    , x = [0,0,0];
+  //March over the volume
+  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0])
+  for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n)
+  for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n) {
+    //For each cell, compute cube mask
+    var cube_index = 0;
+    for(var i=0; i<8; ++i) {
+      var v = cubeVerts[i]
+        , s = potential(
+          scale[0]*(x[0]+v[0])+shift[0],
+          scale[1]*(x[1]+v[1])+shift[1],
+          scale[2]*(x[2]+v[2])+shift[2]);
+      grid[i] = s;
+      cube_index |= (s > 0) ? 1 << i : 0;
+    }
+    //Compute vertices
+    var edge_mask = edgeTable[cube_index];
+    if(edge_mask === 0) {
+      continue;
+    }
+    for(var i=0; i<12; ++i) {
+      if((edge_mask & (1<<i)) === 0) {
+        continue;
+      }
+      edges[i] = vertices.length;
+      var nv = [0,0,0]
+        , e = edgeIndex[i]
+        , p0 = cubeVerts[e[0]]
+        , p1 = cubeVerts[e[1]]
+        , a = grid[e[0]]
+        , b = grid[e[1]]
+        , d = a - b
+        , t = 0;
+      if(Math.abs(d) > 1e-6) {
+        t = a / d;
+      }
+      for(var j=0; j<3; ++j) {
+        nv[j] = scale[j] * ((x[j] + p0[j]) + t * (p1[j] - p0[j])) + shift[j];
+      }
+      vertices.push(nv);
+    }
+    //Add faces
+    var f = triTable[cube_index];
+    for(var i=0; i<f.length; i += 3) {
+      faces.push([edges[f[i]], edges[f[i+1]], edges[f[i+2]]]);
+    }
+  }
+  return { positions: vertices, cells: faces };
+};
+
+
+},{}],14:[function(require,module,exports){
+/**
+ * Marching Tetrahedra in Javascript
+ *
+ * Based on Paul Bourke's implementation
+ *  http://local.wasp.uwa.edu.au/~pbourke/geometry/polygonise/
+ *
+ * (Several bug fixes were made to deal with oriented faces)
+ *
+ * Javascript port by Mikola Lysenko
+ */
+var cube_vertices = [
+        [0,0,0]
+      , [1,0,0]
+      , [1,1,0]
+      , [0,1,0]
+      , [0,0,1]
+      , [1,0,1]
+      , [1,1,1]
+      , [0,1,1] ]
+  , tetra_list = [
+        [0,2,3,7]
+      , [0,6,2,7]
+      , [0,4,6,7]
+      , [0,6,1,2]
+      , [0,1,6,4]
+      , [5,6,1,4] ];
+
+exports.marchingTetrahedra = function(dims, potential, bounds) {
+
+  if(!bounds) {
+    bounds = [[0,0,0], dims];
+  }
+  
+  var scale     = [0,0,0];
+  var shift     = [0,0,0];
+  for(var i=0; i<3; ++i) {
+    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
+    shift[i] = bounds[0][i];
+  }
+   
+   var vertices = []
+    , faces = []
+    , n = 0
+    , grid = new Float32Array(8)
+    , edges = new Int32Array(12)
+    , x = [0,0,0];
+    
+  function interp(i0, i1) {
+    var g0 = grid[i0]
+      , g1 = grid[i1]
+      , p0 = cube_vertices[i0]
+      , p1 = cube_vertices[i1]
+      , v  = [x[0], x[1], x[2]]
+      , t = g0 - g1;
+    if(Math.abs(t) > 1e-6) {
+      t = g0 / t;
+    }
+    for(var i=0; i<3; ++i) {
+      v[i] = scale[i] * (v[i] + p0[i] + t * (p1[i] - p0[i])) + shift[i];
+    }
+    vertices.push(v);
+    return vertices.length - 1;
+  }
+  
+  //March over the volume
+  for(x[2]=0; x[2]<dims[2]-1; ++x[2], n+=dims[0])
+  for(x[1]=0; x[1]<dims[1]-1; ++x[1], ++n)
+  for(x[0]=0; x[0]<dims[0]-1; ++x[0], ++n) {
+    //Read in cube  
+    for(var i=0; i<8; ++i) {
+      var cube_vert = cube_vertices[i];
+      grid[i] = potential(
+        scale[0]*(x[0]+cube_vert[0])+shift[0],
+        scale[1]*(x[1]+cube_vert[1])+shift[1],
+        scale[2]*(x[2]+cube_vert[2])+shift[2]);
+    }
+    for(var i=0; i<tetra_list.length; ++i) {
+      var T = tetra_list[i]
+        , triindex = 0;
+      if (grid[T[0]] < 0) triindex |= 1;
+      if (grid[T[1]] < 0) triindex |= 2;
+      if (grid[T[2]] < 0) triindex |= 4;
+      if (grid[T[3]] < 0) triindex |= 8;
+      
+      //Handle each case
+      switch (triindex) {
+        case 0x00:
+        case 0x0F:
+        break;
+        case 0x0E:
+          faces.push([ 
+              interp(T[0], T[1])
+            , interp(T[0], T[3]) 
+            , interp(T[0], T[2]) ]);
+        break;
+        case 0x01:
+          faces.push([ 
+              interp(T[0], T[1])
+            , interp(T[0], T[2])
+            , interp(T[0], T[3])  ]);
+        break;
+        case 0x0D:
+          faces.push([ 
+              interp(T[1], T[0])
+            , interp(T[1], T[2]) 
+            , interp(T[1], T[3]) ]);
+        break;
+        case 0x02:
+          faces.push([ 
+              interp(T[1], T[0])
+            , interp(T[1], T[3])
+            , interp(T[1], T[2]) ]);
+        break;
+        case 0x0C:
+          faces.push([ 
+                interp(T[1], T[2])
+              , interp(T[1], T[3])
+              , interp(T[0], T[3])
+              , interp(T[0], T[2]) ]);
+        break;
+        case 0x03:
+          faces.push([ 
+                interp(T[1], T[2])
+              , interp(T[0], T[2])
+              , interp(T[0], T[3])
+              , interp(T[1], T[3]) ]);
+        break;
+        case 0x04:
+          faces.push([ 
+                interp(T[2], T[0])
+              , interp(T[2], T[1])
+              , interp(T[2], T[3]) ]);
+        break;
+        case 0x0B:
+          faces.push([ 
+                interp(T[2], T[0])
+              , interp(T[2], T[3]) 
+              , interp(T[2], T[1]) ]);
+        break;
+        case 0x05:
+          faces.push([ 
+                interp(T[0], T[1])
+              , interp(T[1], T[2])
+              , interp(T[2], T[3])
+              , interp(T[0], T[3]) ]);
+        break;
+        case 0x0A:
+          faces.push([ 
+                interp(T[0], T[1])
+              , interp(T[0], T[3])
+              , interp(T[2], T[3])
+              , interp(T[1], T[2]) ]);
+        break;
+        case 0x06:
+          faces.push([ 
+                interp(T[2], T[3])
+              , interp(T[0], T[2])
+              , interp(T[0], T[1])
+              , interp(T[1], T[3]) ]);
+        break;
+        case 0x09:
+          faces.push([ 
+                interp(T[2], T[3])
+              , interp(T[1], T[3])
+              , interp(T[0], T[1])
+              , interp(T[0], T[2]) ]);
+        break;
+        case 0x07:
+          faces.push([ 
+                interp(T[3], T[0])
+              , interp(T[3], T[1])
+              , interp(T[3], T[2]) ]);
+        break;
+        case 0x08:
+          faces.push([ 
+                interp(T[3], T[0])
+              , interp(T[3], T[2])
+              , interp(T[3], T[1]) ]);
+        break;
+      }
+    }
+  }
+  
+  return { positions: vertices, cells: faces };
+}
+
+
+},{}],15:[function(require,module,exports){
+// GLOW.js r1.1 - http://github.com/empaempa/GLOW
+window.GLOW=function(){function b(a,c,b){this.flags=a;this.callback=c;this.context=b}var a={},c={},f=-1,e=[];b.prototype.dispatch=function(a,c){this.flags===a&&(this.context?this.callback.call(this.context,c):this.callback(c))};a.LOGS=1;a.WARNINGS=2;a.ERRORS=4;a.logFlags=a.ERRORS;a.currentContext={};a.registerContext=function(b){c[b.id]=b;a.enableContext(b)};a.getContextById=function(b){if(c[b])return c[b];GLOW.error("Couldn't find context id "+b+", returning current with id "+a.currentContext.id);return a.currentContext};
+a.enableContext=function(c){a.currentContext=typeof c==="string"?getContextById(c):c;GL=a.GL=a.currentContext.GL};a.uniqueId=function(){return++f};a.log=function(c){a.logFlags&a.LOGS&&console.log(c);a.dispatch(a.LOGS,c)};a.warn=function(c){a.logFlags&a.WARNINGS&&console.warn(c);a.dispatch(a.WARNINGS,c)};a.error=function(c){a.logFlags&a.ERRORS&&console.error(c);a.dispatch(a.ERRORS,c)};a.addEventListener=function(a,c,f){e.push(new b(a,c,f));return e[e.length-1]};a.removeEventListener=function(c){c=
+e.indexOf(c);c!==-1?e.splice(c,1):a.warn("GLOW.removeEventListener: Couldn't find listener object")};a.dispatch=function(a,c){for(var b=e.length;b--;)e[b].dispatch(a,c)};return a}(),GL={};
+GLOW.Context=function(){function b(a){a===void 0&&(a={});this.id=a.id!==void 0?a.id:GLOW.uniqueId();this.alpha=a.alpha!==void 0?a.alpha:!0;this.depth=a.depth!==void 0?a.depth:!0;this.antialias=a.antialias!==void 0?a.antialias:!0;this.stencil=a.stencil!==void 0?a.stencil:!1;this.premultipliedAlpha=a.premultipliedAlpha!==void 0?a.premultipliedAlpha:!0;this.preserveDrawingBuffer=a.preserveDrawingBuffer!==void 0?a.preserveDrawingBuffer:!1;this.width=a.width!==void 0?a.width:window.innerWidth;this.height=
+a.height!==void 0?a.height:window.innerHeight;this.cache=new GLOW.Cache;this.debug=a.debug!==void 0?a.debug:!1;if(a.context)this.GL=a.context,GLOW.registerContext(this);else{try{this.domElement=document.createElement("canvas");if(this.debug&&window.WebGLDebugUtils)this.domElement=WebGLDebugUtils.makeLostContextSimulatingCanvas(this.domElement);this.GL=this.domElement.getContext("experimental-webgl",{alpha:this.alpha,depth:this.depth,antialias:this.antialias,stencil:this.stencil,premultipliedAlpha:this.premultipliedAlpha,
+preserveDrawingBuffer:this.preserveDrawingBuffer})}catch(c){GLOW.error("GLOW.Context.construct: "+c)}if(this.GL!==null){GLOW.registerContext(this);this.domElement.width=this.width;this.domElement.height=this.height;this.viewport=a.viewport?{x:a.viewport.x!==void 0?a.viewport.x:0,y:a.viewport.y!==void 0?a.viewport.y:0,width:a.viewport.width!==void 0?a.viewport.width:this.width,height:a.viewport.height!==void 0?a.viewport.height:this.height}:{x:0,y:0,width:this.width,height:this.height};if(a.clear){if(this.clearSettings=
+{r:a.clear.red!==void 0?a.clear.red:0,g:a.clear.green!==void 0?a.clear.green:0,b:a.clear.blue!==void 0?a.clear.blue:0,a:a.clear.alpha!==void 0?a.clear.alpha:1,depth:a.clear.depth!==void 0?a.clear.depth:1,bits:a.clear.bits!==void 0?a.clear.bits:-1},this.clearSettings.bits===-1)this.clearSettings.bits=GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0}else this.clearSettings={r:0,g:0,b:0,a:1,depth:1,bits:0},this.clearSettings.bits=
+GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0;this.enableCulling(!0,{frontFace:GL.CCW,cullFace:GL.BACK});this.enableDepthTest(!0,{func:GL.LEQUAL,write:!0,zNear:0,zFar:1});this.enableBlend(!1);this.setViewport();this.clear()}else GLOW.error("GLOW.Context.construct: unable to initialize WebGL")}}b.prototype.setupClear=function(a){if(a!==void 0)this.clearSettings.r=a.red!==void 0?Math.min(1,Math.max(0,a.red)):
+this.clearSettings.r,this.clearSettings.g=a.green!==void 0?Math.min(1,Math.max(0,a.green)):this.clearSettings.g,this.clearSettings.b=a.blue!==void 0?Math.min(1,Math.max(0,a.blue)):this.clearSettings.b,this.clearSettings.a=a.alpha!==void 0?Math.min(1,Math.max(0,a.alpha)):this.clearSettings.a,this.clearSettings.depth=a.depth!==void 0?Math.min(1,Math.max(0,a.depth)):this.clearSettings.depth,this.clearSettings.bits=a.bits!==void 0?a.bits:this.clearSettings.bits;GL.clearColor(this.clearSettings.r,this.clearSettings.g,
+this.clearSettings.b,this.clearSettings.a);GL.clearDepth(this.clearSettings.depth);return this};b.prototype.clear=function(a){this.setupClear(a);GL.clear(this.clearSettings.bits);return this};b.prototype.enableBlend=function(a,c){a?(GL.enable(GL.BLEND),c&&this.setupBlend(c)):GL.disable(GL.BLEND);return this};b.prototype.setupBlend=function(a){a.equationRGB?(a.equationAlpha&&GL.blendEquationSeparate(a.equationRGB,a.equationAlpha),a.srcRGB&&GL.blendFuncSeparate(a.srcRGB,a.dstRGB,a.srcAlpha,a.dstAlpha)):
+(a.equation&&GL.blendEquation(a.equation),a.src&&GL.blendFunc(a.src,a.dst));return this};b.prototype.enableDepthTest=function(a,c){a?(GL.enable(GL.DEPTH_TEST),c&&this.setupDepthTest(c)):GL.disable(GL.DEPTH_TEST);return this};b.prototype.setupDepthTest=function(a){a.func!==void 0&&GL.depthFunc(a.func);a.write!==void 0&&GL.depthMask(a.write);a.zNear!==void 0&&a.zFar!==void 0&&a.zNear<=a.zFar&&GL.depthRange(Math.max(0,Math.min(1,a.zNear)),Math.max(0,Math.min(1,a.zFar)));return this};b.prototype.enablePolygonOffset=
+function(a,c){a?(GL.enable(GL.POLYGON_OFFSET_FILL),c&&this.setupPolygonOffset(c)):GL.disable(GL.POLYGON_OFFSET_FILL);return this};b.prototype.setupPolygonOffset=function(a){a.factor&&a.units&&GL.polygonOffset(a.factor,a.units)};b.prototype.enableStencilTest=function(a,c){a?(GL.enable(GL.STENCIL_TEST),c&&this.setupStencilTest(c)):GL.disable(GL.STENCIL_TEST);return this};b.prototype.setupStencilTest=function(a){a.func&&a.funcFace?GL.stencilFuncSeparate(a.funcFace,a.func,a.funcRef,a.funcMask):a.func&&
+GL.stencilFunc(a.func,a.funcRef,a.funcMask);a.mask&&a.maskFace?GL.stencilMaskSeparate(a.maskFace,a.mask):a.mask&&GL.stencilMask(a.mask);a.opFail&&a.opFace?GL.stencilOpSeparate(a.opFace,a.opFail,a.opZfail,a.opZpass):a.opFail&&GL.stencilOp(a.opFail,a.opZfail,a.opZpass);return this};b.prototype.enableCulling=function(a,c){a?(GL.enable(GL.CULL_FACE),c&&this.setupCulling(c)):GL.disable(GL.CULL_FACE);return this};b.prototype.setupCulling=function(a){try{a.frontFace&&GL.frontFace(a.frontFace),a.cullFace&&
+GL.cullFace(a.cullFace)}catch(c){GLOW.error("GLOW.Context.setupCulling: "+c)}return this};b.prototype.enableScissor=function(a,c){a?(GL.enable(GL.SCISSOR_TEST),c&&this.setupScissor(c)):GL.disable(GL.SCISSOR_TEST);return this};b.prototype.setupScissor=function(a){try{GL.scissor(a.x,a.y,a.width,a.height)}catch(c){GLOW.error("GLOW.Context.setupScissorTest: "+c)}return this};b.prototype.setViewport=function(){this.setupViewport()};b.prototype.setupViewport=function(a){if(a)this.viewport.x=a.x!==void 0?
+a.x:this.viewport.x,this.viewport.y=a.y!==void 0?a.y:this.viewport.y,this.viewport.width=a.width!==void 0?a.width:this.viewport.width,this.viewport.height=a.height!==void 0?a.height:this.viewport.height;GL.viewport(this.viewport.x,this.viewport.y,this.viewport.width,this.viewport.height);return this};b.prototype.availableExtensions=function(){return GL.getSupportedExtensions()};b.prototype.enableExtension=function(a){for(var c=GL.getSupportedExtensions(),b=0,e=c.length;b<e;b++)if(a.toLowerCase()===
+c[b].toLowerCase())break;if(b!==e)return GL.getExtension(c[b])};b.prototype.getParameter=function(a){return GL.getParameter(a)};b.prototype.maxVertexTextureImageUnits=function(){return this.getParameter(GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS)};b.prototype.resize=function(a,c){var b=c/this.height;this.viewport.width*=a/this.width;this.viewport.height*=b;this.domElement.width=this.width=a;this.domElement.height=this.height=c};return b}();
+GLOW.Compiler=function(){var b={};b.compile=function(a){var c=GLOW.currentContext.cache.codeCompiled(a.vertexShader,a.fragmentShader);c===void 0&&(c=b.linkProgram(b.compileVertexShader(a.vertexShader),b.compileFragmentShader(a.fragmentShader)),GLOW.currentContext.cache.addCompiledProgram(c));var f=b.createUniforms(b.extractUniforms(c),a.data),e=b.createAttributes(b.extractAttributes(c),a.data,a.usage,a.interleave),g=b.interleaveAttributes(e,a.interleave);if(a.elements)GLOW.error("GLOW.Compiler.compile: .elements is no longer supported, please use .indices combined with .primitives");
+else{var h=a.indices,i=a.primitives!==void 0?a.primitives:GL.TRIANGLES,j=a.usage!==void 0?a.usage:{},k=j.primitives;if(a.triangles)h=a.triangles,k=j.triangles;else if(a.triangleStrip)h=a.triangleStrip,i=GL.TRIANGLE_STRIP,k=j.triangleStrip;else if(a.triangleFan)h=a.triangleFan,i=GL.TRIANGLE_FAN,k=j.triangleFan;else if(a.points)h=a.points,i=GL.POINTS,k=j.points;else if(a.lines)h=a.lines,i=GL.LINES,k=j.lines;else if(a.lineLoop)h=a.lineLoop,i=GL.LINE_LOOP,k=j.lineLoop;else if(a.lineStrip)h=a.lineStrip,
+i=GL.LINE_STRIP,k=j.lineStrip;if(h===void 0){for(var l in e)if(e[l].data){h=e[l].data.length/e[l].size;break}if(h===void 0)for(var m in g){for(l in g[m].attributes){h=g[m].attributes[l].data.length/g[m].attributes[l].size;break}break}h===void 0&&(h=0)}h=b.createElements(h,i,k);return new GLOW.CompiledData(c,f,e,g,h,a)}};b.compileVertexShader=function(a){var c;c=GL.createShader(GL.VERTEX_SHADER);c.id=GLOW.uniqueId();GL.shaderSource(c,a);GL.compileShader(c);!GL.getShaderParameter(c,GL.COMPILE_STATUS)&&
+!GL.isContextLost()&&GLOW.error("GLOW.Compiler.compileVertexShader: "+GL.getShaderInfoLog(c));return c};b.compileFragmentShader=function(a){var c;c=GL.createShader(GL.FRAGMENT_SHADER);c.id=GLOW.uniqueId();GL.shaderSource(c,a);GL.compileShader(c);!GL.getShaderParameter(c,GL.COMPILE_STATUS)&&!GL.isContextLost()&&GLOW.error("GLOW.Compiler.compileFragmentShader: "+GL.getShaderInfoLog(c));return c};b.linkProgram=function(a,c){var b=GL.createProgram();b||GLOW.error("GLOW.Compiler.linkProgram: Could not create program");
+b.id=GLOW.uniqueId();GL.attachShader(b,a);GL.attachShader(b,c);GL.linkProgram(b);!GL.getProgramParameter(b,GL.LINK_STATUS)&&!GL.isContextLost()&&GLOW.error("GLOW.Compiler.linkProgram: Could not initialise program");return b};b.extractUniforms=function(a){for(var c={},b,e=0,g=GL.getProgramParameter(a,GL.ACTIVE_UNIFORMS);e<g;e++)if(b=GL.getActiveUniform(a,e),b!==null&&b!==-1&&b!==void 0)b={name:b.name.split("[")[0],size:b.size,type:b.type,location:GL.getUniformLocation(a,b.name.split("[")[0]),locationNumber:e},
+c[b.name]=b;else break;return c};b.extractAttributes=function(a){for(var c={},b,e=0,g=GL.getProgramParameter(a,GL.ACTIVE_ATTRIBUTES);e<g;e++)if(b=GL.getActiveAttrib(a,e),b!==null&&b!==-1&&b!==void 0)b={name:b.name,size:b.size,type:b.type,location:GL.getAttribLocation(a,b.name),locationNumber:e},c[b.name]=b;else break;a.highestAttributeNumber=e-1;return c};b.createUniforms=function(a,c){var b,e={},g,h,i=0;for(b in a)if(g=a[b],h=g.name,c[h]instanceof GLOW.Uniform)e[h]=c[h];else if(c[h]===void 0&&GLOW.warn("GLOW.Compiler.createUniforms: missing data for uniform "+
+h+". Creating anyway, but make sure to set data before drawing."),e[h]=new GLOW.Uniform(g,c[h]),e[h].type===GL.SAMPLER_2D||e[h].type===GL.SAMPLER_CUBE)e[h].textureUnit=i++,e[h].data!==void 0&&e[h].data.init();return e};b.createAttributes=function(a,c,b,e){var g,h,i,j={},e=e!==void 0?e:{},b=b!==void 0?b:{};for(g in a)h=a[g],i=h.name,c[i]instanceof GLOW.Attribute?j[i]=c[i]:(c[i]===void 0&&GLOW.warn("GLOW.Compiler.createAttributes: missing data for attribute "+i+". Creating anyway, but make sure to set data before drawing."),
+j[i]=new GLOW.Attribute(h,c[i],b[i],e[i]!==void 0?e[i]:!0));return j};b.interleaveAttributes=function(a,c){var c=c!==void 0?c:{},b,e,g,h,i;g=0;var j=[];e=0;for(b in a)e++;if(e===1)for(b in a){if(a[b].interleaved===!0)a[b].interleaved=!1,a[b].data&&a[b].bufferData()}else{for(b in a)c[b]!==void 0&&c[b]!==!1&&(g=Math.max(g-1,c[b])+1);for(b in a)c[b]===void 0&&(c[b]=g);for(i in c)c[i]!==!1&&(j[c[i]]===void 0&&(j[c[i]]=[]),j[c[i]].push(a[i]));var k,l;b=0;for(e=j.length;b<e;b++)if(j[b]!==void 0){g=k=0;
+for(h=j[b].length;g<h;g++)if(k+j[b][g].size*4>255){GLOW.warn("GLOW.Compiler.interleaveAttributes: Stride owerflow, moving attributes to new interleave index. Please check your interleave setup!");l=j.length;for(j[l]=[];g<h;)j[l].push(j[b][g]),j[b].splice(g,1),h--}else k+=j[b][g].size*4}l={};b=0;for(e=j.length;b<e;b++)if(j[b]!==void 0){k="";g=0;for(h=j[b].length;g<h;g++)k+=g!==h-1?j[b][g].name+"_":j[b][g].name;l[k]=new GLOW.InterleavedAttributes(j[b])}for(i in c)c[i]!==!1&&delete a[i];return l}};b.createElements=
+function(a,c,b){return a instanceof GLOW.Elements?a:new GLOW.Elements(a,c,b)};return b}();
+GLOW.CompiledData=function(){function b(a,c,b,e,g){this.program=a;this.uniforms=c||{};this.attributes=b||{};this.interleavedAttributes=e||{};this.elements=g;this.interleavedAttributeArray=this.attributeArray=this.uniformArray=void 0;this.createArrays()}b.prototype.createArrays=function(){this.uniformArray=[];this.attributeArray=[];this.interleavedAttributeArray=[];var a,c,b;for(a in this.uniforms)this.uniformArray.push(this.uniforms[a]);for(c in this.attributes)this.attributeArray.push(this.attributes[c]);
+for(b in this.interleavedAttributes)this.interleavedAttributeArray.push(this.interleavedAttributes[b])};b.prototype.clone=function(a){var c=new GLOW.CompiledData,a=a||{},b;for(b in this.uniforms)if(a[b])if(a[b]instanceof GLOW.Uniform)c.uniforms[b]=execept[b];else{if(c.uniforms[b]=new GLOW.Uniform(this.uniforms[b],a[b]),c.uniforms[b].type===GL.SAMPLER_2D||c.uniforms[b].type===GL.SAMPLER_CUBE)c.uniforms[b].textureUnit=this.uniforms[b].textureUnit,c.uniforms[b].data&&c.uniforms[b].data.init()}else c.uniforms[b]=
+this.uniforms[b];for(var e in this.attributes)c.attributes[e]=a[e]?a[e]instanceof GLOW.Attribute?a[e]:new GLOW.Attribute(this.attributes[e],a[e]):this.attributes[e];for(var g in this.interleavedAttributes)c.interleavedAttributes[g]=a[g]?a[g]:this.interleavedAttributes[g];c.elements=a.indices?new GLOW.Elements(a.indices,a.primitives):a.elements instanceof GLOW.Elements?a.elements:this.elements;c.program=a.program?a.program:this.program;c.createArrays();return c};b.prototype.dispose=function(a,c){if(a){var b;
+for(b=this.uniformArray.length;b--;)this.uniformArray[b].dispose();for(b=this.attributeArray.length;b--;)this.attributeArray[b].dispose();for(b=this.interleavedAttributeArray.length;b--;)this.interleavedAttributeArray[b].dispose();this.elements.dispose()}if(c&&GL.isProgram(this.program)&&(b=GL.getAttachedShaders(this.program))){for(var e=b.length;e--;)GL.detachShader(this.program,b[e]),GL.deleteShader(b[e]);GL.deleteProgram(this.program)}delete this.program;delete this.uniforms;delete this.attributes;
+delete this.interleavedAttributes;delete this.elements;delete this.uniformArray;delete this.attributeArray;delete this.interleavedAttributeArray};return b}();
+GLOW.Cache=function(){function b(){this.highestAttributeNumber=-1;this.uniformByLocation=[];this.attributeByLocation=[];this.textureByLocation=[];this.compiledCode=[];this.programId=this.elementId=-1;this.active=!0}b.prototype.codeCompiled=function(a,c){var b,e,g=this.compiledCode.length;for(e=0;e<g;e++)if(b=this.compiledCode[e],a===b.vertexShader&&c===b.fragmentShader)break;if(e===g)this.compiledCode.push({vertexShader:a,fragmentShader:c});else return this.compiledCode[e].program};b.prototype.addCompiledProgram=
+function(a){this.compiledCode[this.compiledCode.length-1].program=a};b.prototype.programCached=function(a){if(this.active){if(a.id===this.programId)return!0;this.programId=a.id;this.uniformByLocation.length=0;this.attributeByLocation.length=0;this.textureByLocation.length=0;this.elementId=-1}return!1};b.prototype.setProgramHighestAttributeNumber=function(a){var c=this.highestAttributeNumber;this.highestAttributeNumber=a.highestAttributeNumber;return a.highestAttributeNumber-c};b.prototype.uniformCached=
+function(a){if(this.active){if(this.uniformByLocation[a.locationNumber]===a.id)return!0;this.uniformByLocation[a.locationNumber]=a.id}return!1};b.prototype.invalidateUniform=function(a){this.uniformByLocation[a.locationNumber]=void 0};b.prototype.attributeCached=function(a){if(this.active){if(this.attributeByLocation[a.locationNumber]===a.id)return!0;this.attributeByLocation[a.locationNumber]=a.id}return!1};b.prototype.interleavedAttributeCached=function(a){if(this.active)for(var c=0,b=a.attributes.length,
+e;c<b;c++){e=a.attributes[c];if(this.attributeByLocation[e.locationNumber]===e.id)return!0;this.attributeByLocation[e.locationNumber]=e.id}return!1};b.prototype.invalidateAttribute=function(a){this.attributeByLocation[a.locationNumber]=void 0};b.prototype.textureCached=function(a,c){if(this.active){if(this.textureByLocation[a]===c.id)return!0;this.textureByLocation[a]=c.id}return!1};b.prototype.invalidateTexture=function(a){this.textureByLocation[a]=void 0};b.prototype.elementsCached=function(a){if(this.active){if(a.id===
+this.elementId)return!0;this.elementId=a.id}return!1};b.prototype.invalidateElements=function(){this.elementId=-1};b.prototype.clear=function(){this.highestAttributeNumber=-1;this.uniformByLocation.length=0;this.attributeByLocation.length=0;this.textureByLocation.length=0;this.programId=this.elementId=-1};return b}();
+GLOW.FBO=function(){function b(a){a=a!==void 0?a:{};this.id=GLOW.uniqueId();this.width=a.width||a.size||window.innerWidth;this.height=a.height||a.size||window.innerHeight;this.wrapS=a.wrapS||a.wrap||GL.CLAMP_TO_EDGE;this.wrapT=a.wrapT||a.wrap||GL.CLAMP_TO_EDGE;this.magFilter=a.magFilter||a.filter||GL.LINEAR;this.minFilter=a.minFilter||a.filter||GL.LINEAR;this.internalFormat=a.internalFormat||GL.RGBA;this.format=a.format||GL.RGBA;this.type=a.type||GL.UNSIGNED_BYTE;this.depth=a.depth!==void 0?a.depth:
+!0;this.stencil=a.stencil!==void 0?a.stencil:!1;this.data=a.data||null;this.isBound=!1;this.textureUnit=-1;this.textureType=a.cube!==!0?GL.TEXTURE_2D:GL.TEXTURE_CUBE_MAP;this.viewport=a.viewport?{x:a.viewport.x!==void 0?a.viewport.x:0,y:a.viewport.y!==void 0?a.viewport.y:0,width:a.viewport.width!==void 0?a.viewport.width:this.width,height:a.viewport.height!==void 0?a.viewport.height:this.height}:{x:0,y:0,width:this.width,height:this.height};if(a.clear){if(this.clearSettings={r:a.clear.red!==void 0?
+a.clear.red:0,g:a.clear.green!==void 0?a.clear.green:0,b:a.clear.blue!==void 0?a.clear.blue:0,a:a.clear.alpha!==void 0?a.clear.alpha:1,depth:a.clear.depth!==void 0?a.clear.depth:1,bits:a.clear.bits!==void 0?a.clear.bits:-1},this.clearSettings.bits===-1)this.clearSettings.bits=GL.COLOR_BUFFER_BIT,this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0}else this.clearSettings={r:0,g:0,b:0,a:1,depth:1,bits:0},this.clearSettings.bits=GL.COLOR_BUFFER_BIT,
+this.clearSettings.bits|=this.depth?GL.DEPTH_BUFFER_BIT:0,this.clearSettings.bits|=this.stencil?GL.STENCIL_BUFFER_BIT:0;this.createBuffers()}var a={posX:0,negX:1,posY:2,negY:3,posZ:4,negZ:5};b.prototype.createBuffers=function(){this.texture=GL.createTexture();var c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL)GLOW.error("GLOW.FBO.createBuffers: Error creating render texture.");else{GL.bindTexture(this.textureType,this.texture);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_S,this.wrapS);
+GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_T,this.wrapT);GL.texParameteri(this.textureType,GL.TEXTURE_MAG_FILTER,this.magFilter);GL.texParameteri(this.textureType,GL.TEXTURE_MIN_FILTER,this.minFilter);if(this.textureType===GL.TEXTURE_2D)this.data===null||this.data instanceof Uint8Array||this.data instanceof Float32Array?GL.texImage2D(this.textureType,0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data):GL.texImage2D(this.textureType,0,this.internalFormat,this.format,
+this.type,this.data);else for(var b in a)GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[b],0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data[b]);if(this.depth||this.stencil){this.renderBuffer=GL.createRenderbuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating render buffer.");return}GL.bindRenderbuffer(GL.RENDERBUFFER,this.renderBuffer);this.depth&&!this.stencil?GL.renderbufferStorage(GL.RENDERBUFFER,
+GL.DEPTH_COMPONENT16,this.width,this.height):!this.depth&&this.stencil?GL.renderbufferStorage(GL.RENDERBUFFER,GL.STENCIL_INDEX8,this.width,this.height):this.depth&&this.stencil&&GL.renderbufferStorage(GL.RENDERBUFFER,GL.DEPTH_STENCIL,this.width,this.height)}if(this.textureType===GL.TEXTURE_2D){this.frameBuffer=GL.createFramebuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating frame buffer.");return}GL.bindFramebuffer(GL.FRAMEBUFFER,
+this.frameBuffer);GL.framebufferTexture2D(GL.FRAMEBUFFER,GL.COLOR_ATTACHMENT0,GL.TEXTURE_2D,this.texture,0);this.depth&&!this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):!this.depth&&this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):this.depth&&this.stencil&&GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer)}else{this.frameBuffers=
+{};for(var e in a){this.frameBuffers[e]=GL.createFramebuffer();c=GL.getError();if(c!==GL.NO_ERROR&&c!==GL.CONTEXT_LOST_WEBGL){GLOW.error("GLOW.FBO.createBuffers: Error creating frame buffer for side "+e);return}GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffers[e]);GL.framebufferTexture2D(GL.FRAMEBUFFER,GL.COLOR_ATTACHMENT0,GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[e],this.texture,0);this.depth&&!this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):
+!this.depth&&this.stencil?GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer):this.depth&&this.stencil&&GL.framebufferRenderbuffer(GL.FRAMEBUFFER,GL.DEPTH_STENCIL_ATTACHMENT,GL.RENDERBUFFER,this.renderBuffer)}}GL.bindTexture(this.textureType,null);GL.bindRenderbuffer(GL.RENDERBUFFER,null);GL.bindFramebuffer(GL.FRAMEBUFFER,null)}};b.prototype.deleteBuffers=function(){this.texture&&GL.deleteTexture(this.texture);this.renderBuffer&&GL.deleteRenderbuffer(this.renderBuffer);
+if(this.textureType===GL.TEXTURE_2D)this.frameBuffer&&GL.deleteFramebuffer(this.frameBuffer);else for(var c in a)GL.deleteFramebuffer(this.frameBuffers[c])};b.prototype.init=function(){};b.prototype.bind=function(a,b){if(!this.isBound)this.isBound=!0,(a||a===void 0)&&this.setupViewport(a),this.textureType===GL.TEXTURE_2D?GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffer):GL.bindFramebuffer(GL.FRAMEBUFFER,this.frameBuffers[b!==void 0?b:"posX"]);return this};b.prototype.unbind=function(a){if(this.isBound)this.isBound=
+!1,GL.bindFramebuffer(GL.FRAMEBUFFER,null),(a===void 0||a===!0)&&GL.viewport(GLOW.currentContext.viewport.x,GLOW.currentContext.viewport.y,GLOW.currentContext.viewport.width,GLOW.currentContext.viewport.height);return this};b.prototype.setViewport=function(){this.setupViewport()};b.prototype.setupViewport=function(a){if(a)this.viewport.x=a.x!==void 0?a.x:this.viewport.x,this.viewport.y=a.y!==void 0?a.y:this.viewport.y,this.viewport.width=a.width!==void 0?a.width:this.viewport.width,this.viewport.height=
+a.height!==void 0?a.height:this.viewport.height;GL.viewport(this.viewport.x,this.viewport.y,this.viewport.width,this.viewport.height);return this};b.prototype.setupClear=function(a){if(a!==void 0)this.clearSettings.r=a.red!==void 0?Math.min(1,Math.max(0,a.red)):this.clearSettings.r,this.clearSettings.g=a.green!==void 0?Math.min(1,Math.max(0,a.green)):this.clearSettings.g,this.clearSettings.b=a.blue!==void 0?Math.min(1,Math.max(0,a.blue)):this.clearSettings.b,this.clearSettings.a=a.alpha!==void 0?
+Math.min(1,Math.max(0,a.alpha)):this.clearSettings.a,this.clearSettings.depth=a.depth!==void 0?Math.min(1,Math.max(0,a.depth)):this.clearSettings.depth,this.clearSettings.bits=a.bits!==void 0?a.bits:this.clearSettings.bits;GL.clearColor(this.clearSettings.r,this.clearSettings.g,this.clearSettings.b,this.clearSettings.a);GL.clearDepth(this.clearSettings.depth);return this};b.prototype.clear=function(a){this.isBound&&(this.setupClear(a),GL.clear(this.clearSettings.bits));return this};b.prototype.resize=
+function(a,b){var e=b/this.height;this.viewport.width*=a/this.width;this.viewport.height*=e;this.width=a;this.height=b;this.deleteBuffers();this.createBuffers();return this};b.prototype.generateMipMaps=function(){GL.bindTexture(this.textureType,this.texture);GL.generateMipmap(this.textureType);GL.bindTexture(this.textureType,null);return this};b.prototype.dispose=function(){this.deleteBuffers();delete this.data;delete this.viewport;delete this.texture;delete this.renderBuffer;delete this.frameBuffer;
+delete this.frameBuffers;delete this.viewport;delete this.clearSettings};return b}();
+GLOW.Texture=function(){function b(a){if(a.url!==void 0)a.data=a.url;this.id=GLOW.uniqueId();this.data=a.data;this.autoUpdate=a.autoUpdate;this.internalFormat=a.internalFormat||GL.RGBA;this.format=a.format||GL.RGBA;this.type=a.type||GL.UNSIGNED_BYTE;this.wrapS=a.wrapS||a.wrap||GL.REPEAT;this.wrapT=a.wrapT||a.wrap||GL.REPEAT;this.magFilter=a.magFilter||a.filter||GL.LINEAR;this.minFilter=a.minFilter||a.filter||GL.LINEAR_MIPMAP_LINEAR;this.width=a.width;this.height=a.height;this.onLoadComplete=a.onLoadComplete;
+this.onLoadContext=a.onLoadContext;this.texture=void 0}var a={posX:0,negX:1,posY:2,negY:3,posZ:4,negZ:5};b.prototype.init=function(){if(this.texture!==void 0)return this;if(this.data===void 0&&this.width!==void 0&&this.height!==void 0)this.data=this.type===GL.UNSIGNED_BYTE?new Uint8Array(this.width*this.height*(this.format===GL.RGBA?4:3)):new Float32Array(this.width*this.height*(this.format===GL.RGBA?4:3));else if(typeof this.data==="string"){this.textureType=GL.TEXTURE_2D;var b=this.data,f=b.toLowerCase();
+if(f.indexOf(".jpg")!==-1||f.indexOf(".png")!==-1||f.indexOf(".gif")!==-1||f.indexOf("jpeg")!==-1)this.data=new Image,this.data.scope=this,this.data.onload=this.onLoadImage;else{if(this.autoUpdate===void 0)this.autoUpdate=!0;this.data=document.createElement("video");this.data.scope=this;this.data.addEventListener("loadeddata",this.onLoadVideo,!1)}this.data.src=b}else if(this.data instanceof HTMLImageElement||this.data instanceof HTMLVideoElement||this.data instanceof HTMLCanvasElement||this.data instanceof
+Uint8Array||this.data instanceof Float32Array)this.textureType=GL.TEXTURE_2D,this.createTexture();else{this.textureType=GL.TEXTURE_CUBE_MAP;this.itemsToLoad=0;for(var e in a)this.data[e]!==void 0?typeof this.data[e]==="string"&&this.itemsToLoad++:GLOW.error("GLOW.Texture.init: data type error. Did you forget cube map "+e+"? If not, the data type is not supported");if(this.itemsToLoad===0)this.createTexture();else for(e in a)if(typeof this.data[e]==="string")b=this.data[e],f=b.toLowerCase(),f.indexOf(".jpg")!==
+-1||f.indexOf(".png")!==-1||f.indexOf(".gif")!==-1||f.indexOf("jpeg")!==-1?(this.data[e]=new Image,this.data[e].scope=this,this.data[e].onload=this.onLoadCubeImage):(this.autoUpdate!==void 0?this.autoUpdate[e]=this.autoUpdate[e]!==void 0?this.autoUpdate[e]:!0:(this.autoUpdate={},this.autoUpdate[e]=!0),this.data[e]=document.createElement("video"),this.data[e].scope=this,this.data[e].addEventListener("loadeddata",this.onLoadCubeVideo,!1)),this.data[e].src=b}return this};b.prototype.createTexture=function(){this.texture!==
+void 0&&GL.deleteTexture(this.texture);this.texture=GL.createTexture();GL.bindTexture(this.textureType,this.texture);if(this.textureType===GL.TEXTURE_2D)if(this.data instanceof Uint8Array)if(this.width!==void 0&&this.height!==void 0)GL.texImage2D(this.textureType,0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data);else{GLOW.error("GLOW.Texture.createTexture: Textures of type Uint8Array requires width and height parameters. Quitting.");return}else GL.texImage2D(this.textureType,
+0,this.internalFormat,this.format,this.type,this.data);else for(var b in a)if(this.data[b]instanceof Uint8Array||this.data[b]instanceof Float32Array)if(this.width!==void 0&&this.height!==void 0)GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[b],0,this.internalFormat,this.width,this.height,0,this.format,this.type,this.data[b]);else{GLOW.error("GLOW.Texture.createTexture: Textures of type Uint8Array/Float32Array requires width and height parameters. Quitting.");return}else GL.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+
+a[b],0,this.internalFormat,this.format,this.type,this.data[b]);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_S,this.wrapS);GL.texParameteri(this.textureType,GL.TEXTURE_WRAP_T,this.wrapT);GL.texParameteri(this.textureType,GL.TEXTURE_MIN_FILTER,this.minFilter);GL.texParameteri(this.textureType,GL.TEXTURE_MAG_FILTER,this.magFilter);this.minFilter!==GL.NEAREST&&this.minFilter!==GL.LINEAR&&GL.generateMipmap(this.textureType);return this};b.prototype.updateTexture=function(b){if(this.texture!==void 0){var b=
+b!==void 0?b:{},f=b.level||0,e=b.xOffset||0,g=b.yOffset||0,h=b.updateMipmap!==void 0?b.updateMipmap:!0;this.data=b.data||this.data;GL.bindTexture(this.textureType,this.texture);if(this.textureType==GL.TEXTURE_2D)this.data instanceof Uint8Array?GL.texSubImage2D(this.textureType,f,e,g,this.width,this.height,this.format,this.type,this.data):GL.texSubImage2D(this.textureType,f,e,g,this.format,this.type,this.data);else for(var i in b)a[i]!==void 0&&(this.data[i]instanceof Uint8Array?GL.texSubImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+
+a[i],f,e,g,this.width,this.height,this.format,this.type,this.data[i]):GL.texSubImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X+a[i],f,e,g,this.format,this.type,this.data[i]));this.minFilter!==GL.NEAREST&&this.minFilter!==GL.LINEAR&&h===!0&&GL.generateMipmap(this.textureType)}};b.prototype.swapTexture=function(a){this.dispose();this.data=a;this.init()};b.prototype.onLoadImage=function(){this.scope.createTexture();this.scope.onLoadComplete&&this.scope.onLoadComplete.call(this.scope.onLoadContext,this.scope)};
+b.prototype.onLoadCubeImage=function(){this.scope.itemsToLoad--;this.scope.itemsToLoad===0&&this.scope.createTexture()};b.prototype.onLoadVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.createTexture()};b.prototype.onLoadCubeVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.itemsToLoad--;this.scope.itemsToLoad===0&&this.scope.createTexture()};b.prototype.play=function(){if(this.textureType===GL.TEXTURE_2D)this.data instanceof
+HTMLVideoElement&&this.data.play();else for(var b in a)this.data[b]instanceof HTMLVideoElement&&this.data[b].play()};b.prototype.dispose=function(){if(this.texture!==void 0)GL.deleteTexture(this.texture),this.texture=void 0;this.data=void 0};return b}();
+GLOW.Shader=function(){function b(a){this.id=GLOW.uniqueId();this.compiledData=a.use?a.use.clone(a.except):GLOW.Compiler.compile(a);this.uniforms=this.compiledData.uniforms;this.elements=this.compiledData.elements;this.program=this.compiledData.program;this.attachData()}b.prototype.attachData=function(){var a,b,f;for(a in this.uniforms)this[a]===void 0?this.uniforms[a].data!==void 0?this[a]=this.uniforms[a].data:GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: no data for uniform "+a+", not attaching for easy access. Please use Shader.uniforms."+
+a+".data to set data."):this[a]!==this.uniforms[a].data&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on uniform "+a+", not attaching for easy access. Please use Shader.uniforms."+a+".data to access data.");for(b in this.compiledData.attributes){if(this.attributes===void 0)this.attributes=this.compiledData.attributes;this[b]===void 0?this[b]=this.compiledData.attributes[b]:this[b]!==this.compiledData.attributes[b]&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on attribute "+
+b+", not attaching for easy access. Please use Shader.attributes."+b+".data to access data.")}for(f in this.compiledData.interleavedAttributes){if(this.interleavedAttributes===void 0)this.interleavedAttributes=this.compiledData.interleavedAttributes;this[f]===void 0?this[f]=this.compiledData.interleavedAttributes[f]:this[f]!==this.compiledData.interleavedAttributes[f]&&GLOW.warn("GLOW.Shader.attachUniformAndAttributeData: name collision on interleavedAttribute "+b+", not attaching for easy access. Please use Shader.interleavedAttributes."+
+b+".data to access data.")}};b.prototype.draw=function(){var a=this.compiledData,b=GLOW.currentContext.cache;if(!b.programCached(a.program)){GL.useProgram(a.program);var f=b.setProgramHighestAttributeNumber(a.program);if(f){var e=a.program.highestAttributeNumber,g=e-f+1;if(f>0)for(;g<=e;g++)GL.enableVertexAttribArray(g);else for(g--;g>e;g--)GL.disableVertexAttribArray(g)}}f=a.attributeArray;for(e=f.length;e--;)f[e].interleaved===!1&&(b.attributeCached(f[e])||f[e].bind());f=a.interleavedAttributeArray;
+for(e=f.length;e--;)b.interleavedAttributeCached(f[e])||f[e].bind();f=a.uniformArray;for(e=f.length;e--;)b.uniformCached(f[e])||f[e].load();a.elements.draw()};b.prototype.clone=function(a){return new GLOW.Shader({use:this.compiledData,except:a})};b.prototype.dispose=function(a,b){var f,e,g;for(f in this.compiledData.uniforms)delete this[f];for(e in this.compiledData.attributes)delete this[e];for(g in this.compiledData.interleavedAttributes)delete this[g];delete this.program;delete this.elements;delete this.uniforms;
+delete this.attributes;delete this.interleavedAttributes;this.compiledData.dispose(a,b);delete this.compiledData};return b}();
+GLOW.Elements=function(){function b(a,b,f,e){this.id=GLOW.uniqueId();this.type=b!==void 0?b:GL.TRIANGLES;this.offset=e!==void 0?e:0;typeof a==="number"||a===void 0?this.length=a:(a instanceof Uint16Array||(a=new Uint16Array(a)),this.length=a.length,this.elements=GL.createBuffer(),GL.bindBuffer(GL.ELEMENT_ARRAY_BUFFER,this.elements),GL.bufferData(GL.ELEMENT_ARRAY_BUFFER,a,f?f:GL.STATIC_DRAW))}b.prototype.draw=function(){this.elements!==void 0?(GLOW.currentContext.cache.elementsCached(this)||GL.bindBuffer(GL.ELEMENT_ARRAY_BUFFER,
+this.elements),GL.drawElements(this.type,this.length,GL.UNSIGNED_SHORT,this.offset)):GL.drawArrays(this.type,this.offset,this.length)};b.prototype.clone=function(a){a=a||{};return new GLOW.Elements(a.data||this.data,a.type||this.type,a.usage,a.offset||this.offset)};b.prototype.dispose=function(){this.elements!==void 0&&(GL.deleteBuffer(this.elements),delete this.elements)};return b}();
+GLOW.Uniform=function(){function b(){f[GL.INT]=function(){GL.uniform1iv(this.location,this.getNativeValue())};f[GL.FLOAT]=function(){GL.uniform1fv(this.location,this.getNativeValue())};f[GL.INT_VEC2]=function(){GL.uniform2iv(this.location,this.getNativeValue())};f[GL.INT_VEC3]=function(){GL.uniform3iv(this.location,this.getNativeValue())};f[GL.INT_VEC4]=function(){GL.uniform4iv(this.location,this.getNativeValue())};f[GL.BOOL]=function(){GL.uniform1iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC2]=
+function(){GL.uniform2iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC3]=function(){GL.uniform3iv(this.location,this.getNativeValue())};f[GL.BOOL_VEC4]=function(){GL.uniform4iv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC2]=function(){GL.uniform2fv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC3]=function(){GL.uniform3fv(this.location,this.getNativeValue())};f[GL.FLOAT_VEC4]=function(){GL.uniform4fv(this.location,this.getNativeValue())};f[GL.FLOAT_MAT2]=function(){GL.uniformMatrix2fv(this.location,
+!1,this.getNativeValue())};f[GL.FLOAT_MAT3]=function(){GL.uniformMatrix3fv(this.location,!1,this.getNativeValue())};f[GL.FLOAT_MAT4]=function(){GL.uniformMatrix4fv(this.location,!1,this.getNativeValue())};f[GL.SAMPLER_2D]=function(){this.data.texture!==void 0&&this.textureUnit!==-1&&!GLOW.currentContext.cache.textureCached(this.textureUnit,this.data)&&(GL.uniform1i(this.location,this.textureUnit),GL.activeTexture(GL.TEXTURE0+this.textureUnit),GL.bindTexture(GL.TEXTURE_2D,this.data.texture),this.data.autoUpdate&&
+this.data.updateTexture(this.data.autoUpdate))};f[GL.SAMPLER_CUBE]=function(){this.data.texture!==void 0&&this.textureUnit!==-1&&!GLOW.currentContext.cache.textureCached(this.textureUnit,this.data)&&(GL.uniform1i(this.location,this.textureUnit),GL.activeTexture(GL.TEXTURE0+this.textureUnit),GL.bindTexture(GL.TEXTURE_CUBE_MAP,this.data.texture),this.data.autoUpdate&&this.data.updateTexture(this.data.autoUpdate))}}function a(a,g){c||(c=!0,b());this.id=GLOW.uniqueId();this.data=g;this.name=a.name;this.length=
+a.length;this.type=a.type;this.location=a.location;this.locationNumber=a.locationNumber;this.textureUnit=-1;this.load=a.loadFunction||f[this.type]}var c=!1,f=[];a.prototype.getNativeValue=function(){return this.data.value};a.prototype.clone=function(a){return new GLOW.Uniform(this,a||this.data)};a.prototype.dispose=function(){delete this.data;delete this.load;delete this.location};return a}();
+GLOW.Attribute=function(){function b(b,e,g,h){a||(a=!0,c[GL.INT]=1,c[GL.INT_VEC2]=2,c[GL.INT_VEC3]=3,c[GL.INT_VEC4]=4,c[GL.BOOL]=1,c[GL.BOOL_VEC2]=2,c[GL.BOOL_VEC3]=3,c[GL.BOOL_VEC4]=4,c[GL.FLOAT]=1,c[GL.FLOAT_VEC2]=2,c[GL.FLOAT_VEC3]=3,c[GL.FLOAT_VEC4]=4,c[GL.FLOAT_MAT2]=4,c[GL.FLOAT_MAT3]=9,c[GL.FLOAT_MAT4]=16);this.id=GLOW.uniqueId();this.data=e;this.location=b.location;this.locationNumber=b.locationNumber;this.offset=this.stride=0;this.usage=g!==void 0?g:GL.STATIC_DRAW;this.interleaved=h!==void 0?
+h:!1;this.size=c[b.type];this.name=b.name;this.type=b.type;this.data&&(this.data.length/this.size>65536&&GLOW.warn("GLOW.Attribute.constructor: Unreachable attribute? Please activate GL.drawArrays or split into multiple shaders. Indexed elements cannot reach attribute data beyond 65535."),this.interleaved===!1&&this.bufferData(this.data,this.usage))}var a=!1,c=[];b.prototype.setupInterleave=function(a,b){this.interleaved=!0;this.offset=a;this.stride=b};b.prototype.bufferData=function(a,b){if(a!==
+void 0&&this.data!==a)this.data=a;if(b!==void 0&&this.usage!==b)this.usage=b;if(this.buffer===void 0)this.buffer=GL.createBuffer();if(this.data.constructor.toString().indexOf(" Array()")!==-1)this.data=new Float32Array(this.data);GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.bufferData(GL.ARRAY_BUFFER,this.data,this.usage)};b.prototype.bind=function(){this.interleaved===!1&&GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.vertexAttribPointer(this.location,this.size,GL.FLOAT,!1,this.stride,this.offset)};
+b.prototype.clone=function(a){if(this.interleaved)GLOW.error("GLOW.Attribute.clone: Cannot clone interleaved attribute. Please check your interleave setup.");else return a=a||{},new GLOW.Attribute(this,a.data||this.data,a.usage||this.usage,a.interleaved||this.interleaved)};b.prototype.dispose=function(){this.buffer&&(GL.deleteBuffer(this.buffer),delete this.buffer);delete this.data};return b}();
+GLOW.InterleavedAttributes=function(){function b(a){this.id=GLOW.uniqueId();this.attributes=a;var b,f=a[0].data.length/a[0].size,e,g=a.length,h,i,j,k=[],l,m=[];for(e=0;e<g;e++)k[e]=0;for(b=0;b<f;b++)for(e=0;e<g;e++){l=a[e].data;j=k[e];h=0;for(i=a[e].size;h<i;h++)m.push(l[j++]);k[e]=j}this.data=new Float32Array(m);this.usage=a[0].usage;for(e=0;e<g;e++)if(this.usage!==a[e].usage){GLOW.warn("GLOW.InterleavedAttributes.construct: Attribute "+a[e].name+" has different usage, defaulting to STATIC_DRAW.");
+this.usage=GL.STATIC_DRAW;break}this.bufferData(this.data,this.usage);for(e=b=0;e<g;e++)b+=a[e].size*4;for(e=f=0;e<g;e++)a[e].setupInterleave(f,b),f+=a[e].size*4}b.prototype.bufferData=function(a,b){if(a!==void 0&&this.data!==a)this.data=a;if(this.buffer===void 0)this.buffer=GL.createBuffer();GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);GL.bufferData(GL.ARRAY_BUFFER,this.data,b?b:GL.STATIC_DRAW)};b.prototype.bind=function(){GL.bindBuffer(GL.ARRAY_BUFFER,this.buffer);for(var a=this.attributes.length;a--;)this.attributes[a].bind()};
+b.prototype.dispose=function(){this.buffer&&(GL.deleteBuffer(this.buffer),delete this.buffer);delete this.data;if(this.attributes){for(var a=this.attributes.length;a--;)this.attributes[a].dispose();delete this.attributes}};return b}();
+GLOW.Float=function(){function b(a){a!==void 0&&a.length?this.value=new Float32Array(a):(this.value=new Float32Array(1),this.value[0]=a!==void 0?a:0)}b.prototype.set=function(a){this.value[0]=a;return this};b.prototype.add=function(a){this.value[0]+=a;return this};b.prototype.sub=function(a){this.value[0]-=a;return this};b.prototype.multiply=function(a){this.value[0]*=a;return this};b.prototype.divide=function(a){this.value[0]/=a;return this};b.prototype.modulo=function(a){this.value[0]%=a;return this};
+return b}();
+GLOW.Int=function(){function b(a){a!==void 0&&a.length?this.value=new Int32Array(a):(this.value=new Int32Array(1),this.value[0]=a!==void 0?a:0)}b.prototype.set=function(a){this.value[0]=a;return this};b.prototype.add=function(a){this.value[0]+=a;return this};b.prototype.sub=function(a){this.value[0]-=a;return this};b.prototype.multiply=function(a){this.value[0]*=a;return this};b.prototype.divide=function(a){this.value[0]/=a;return this};b.prototype.modulo=function(a){this.value[0]%=a;return this};
+return b}();GLOW.Bool=function(){function b(a){this.value=[];this.value[0]=a!==void 0?!!a:!1}b.prototype.set=function(a){this.value[0]=!!a;return this};return b}();GLOW.Bool2=function(){function b(a,b){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1}b.prototype.set=function(a,b){this.value[0]=!!a;this.value[1]=!!b;return this};return b}();
+GLOW.Bool3=function(){function b(a,b,f){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1;this.value[2]=f!==void 0?!!f:!1}b.prototype.set=function(a,b,f){this.value[0]=!!a;this.value[1]=!!b;this.value[2]=!!f;return this};return b}();
+GLOW.Bool4=function(){function b(a,b,f,e){this.value=[];this.value[0]=a!==void 0?!!a:!1;this.value[1]=b!==void 0?!!b:!1;this.value[2]=f!==void 0?!!f:!1;this.value[3]=e!==void 0?!!e:!1}b.prototype.set=function(a,b,f,e){this.value[0]=!!a;this.value[1]=!!b;this.value[2]=!!f;this.value[3]=!!e;return this};return b}();
+GLOW.Vector2=function(){function b(a,b){this.value=new Float32Array(2);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0}b.prototype.set=function(a,b){this.value[0]=a;this.value[1]=b;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];return this};b.prototype.addSelf=function(a){this.value[0]+=a.value[0];this.value[1]+=a.value[1];return this};b.prototype.add=function(a,b){this.value[0]=a.value[0]+b.value[0];this.value[1]=a.value[1]+b.value[1];return this};
+b.prototype.subSelf=function(a){this.value[0]-=a.x;this.value[1]-=a.y;return this};b.prototype.sub=function(a,b){this.value[0]=a.value[0]-b.value[0];this.value[1]=a.value[1]-b.value[1];return this};b.prototype.multiplySelf=function(a){this.value[0]*=a.value[0];this.value[1]*=a.value[1];return this};b.prototype.multiply=function(a,b){this.value[0]=a.value[0]*b.value[0];this.value[1]=a.value[1]*b.value[1];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;return this};
+b.prototype.negate=function(){this.value[0]=-this.value[0];this.value[1]=-this.value[1];return this};b.prototype.normalize=function(){this.multiplyScalar(1/this.length());return this};b.prototype.length=function(){return Math.sqrt(this.lengthSq())};b.prototype.lengthSq=function(){return this.value[0]*this.value[0]+this.value[1]*this.value[1]};b.prototype.clone=function(){return new GLOW.Vector2(this.value[0],this.value[1])};return b}();
+GLOW.Vector3=function(){function b(a,b,f){this.value=new Float32Array(3);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0;this.value[2]=f!==void 0?f:0}b.prototype.set=function(a,b,f){this.value[0]=a;this.value[1]=b;this.value[2]=f;return this};b.prototype.copy=function(a){this.set(a.value[0],a.value[1],a.value[2]);return this};b.prototype.add=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]+b[0];this.value[1]=a[1]+b[1];this.value[2]=a[2]+b[2];return this};b.prototype.addSelf=function(a){a=
+a.value;this.value[0]+=a[0];this.value[1]+=a[1];this.value[2]+=a[2];return this};b.prototype.addScalar=function(a){this.value[0]+=a;this.value[1]+=a;this.value[2]+=a;return this};b.prototype.sub=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]-b[0];this.value[1]=a[1]-b[1];this.value[2]=a[2]-b[2];return this};b.prototype.subSelf=function(a){a=a.value;this.value[0]-=a[0];this.value[1]-=a[1];this.value[2]-=a[2];return this};b.prototype.cross=function(a,b){a=a.value;b=b.value;this.value[0]=a[1]*b[2]-
+a[2]*b[1];this.value[1]=a[2]*b[0]-a[0]*b[2];this.value[2]=a[0]*b[1]-a[1]*b[0];return this};b.prototype.crossSelf=function(a){var a=a.value,b=a[0],f=a[1],a=a[2],e=this.value[0],g=this.value[1],h=this.value[2];this.value[0]=f*h-a*g;this.value[1]=a*e-b*h;this.value[2]=b*g-f*e;return this};b.prototype.multiply=function(a,b){a=a.value;b=b.value;this.value[0]=a[0]*b[0];this.value[1]=a[1]*b[1];this.value[2]=a[2]*b[2];return this};b.prototype.multiplySelf=function(a){a=a.value;this.value[0]*=a[0];this.value[1]*=
+a[1];this.value[2]*=a[2];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=a;return this};b.prototype.divideSelf=function(a){a=a.value;this.value[0]/=a[0];this.value[1]/=a[1];this.value[2]/=a[2];return this};b.prototype.divideScalar=function(a){this.value[0]/=a;this.value[1]/=a;this.value[2]/=a;return this};b.prototype.negate=function(){this.value[0]=-this.value[0];this.value[1]=-this.value[1];this.value[2]=-this.value[2];return this};b.prototype.dot=
+function(a){a=a.value;return this.value[0]*a[0]+this.value[1]*a[1]+this.value[2]*a[2]};b.prototype.distanceTo=function(a){return Math.sqrt(this.distanceToSquared(a))};b.prototype.distanceToSquared=function(a){var a=a.value,b=this.value[0]-a[0],f=this.value[1]-a[1],a=this.value[2]-a[2];return b*b+f*f+a*a};b.prototype.length=function(){return Math.sqrt(this.lengthSq())};b.prototype.lengthSq=function(){return this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2]};b.prototype.lengthManhattan=
+function(){return this.value[0]+this.value[1]+this.value[2]};b.prototype.normalize=function(){var a=Math.sqrt(this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2]);a>0?this.multiplyScalar(1/a):this.set(0,0,0);return this};b.prototype.setPositionFromMatrix=function(a){a=a.value;this.value[0]=a[12];this.value[1]=a[13];this.value[2]=a[14]};b.prototype.setLength=function(a){return this.normalize().multiplyScalar(a)};b.prototype.isZero=function(){return Math.abs(this.value[0])<
+1.0E-4&&Math.abs(this.value[1])<1.0E-4&&Math.abs(this.value[2])<1.0E-4};b.prototype.clone=function(){return GLOW.Vector3(this.value[0],this.value[1],this.value[2])};return b}();
+GLOW.Vector4=function(){function b(a,b,f,e){this.value=new Float32Array(4);this.value[0]=a!==void 0?a:0;this.value[1]=b!==void 0?b:0;this.value[2]=f!==void 0?f:0;this.value[3]=e!==void 0?e:0}b.prototype.set=function(a,b,f,e){this.value[0]=a;this.value[1]=b;this.value[2]=f;this.value[3]=e;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];this.value[2]=a.value[2];this.value[3]=a.value[3];return this};b.prototype.add=function(a,b){this.value[0]=a.value[0]+b.value[0];
+this.value[1]=a.value[1]+b.value[1];this.value[2]=a.value[2]+b.value[2];this.value[3]=a.value[3]+b.value[3];return this};b.prototype.addSelf=function(a){this.value[0]+=a.value[0];this.value[1]+=a.value[1];this.value[2]+=a.value[2];this.value[3]+=a.value[3];return this};b.prototype.sub=function(a,b){this.value[0]=a.value[0]-b.value[0];this.value[1]=a.value[1]-b.value[1];this.value[2]=a.value[2]-b.value[2];this.value[3]=a.value[3]-b.value[3];return this};b.prototype.subSelf=function(a){this.value[0]-=
+a.value[0];this.value[1]-=a.value[1];this.value[2]-=a.value[2];this.value[3]-=a.value[3];return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=a;this.value[3]*=a;return this};b.prototype.divideScalar=function(a){this.value[0]/=a;this.value[1]/=a;this.value[2]/=a;this.value[3]/=a;return this};b.prototype.lerpSelf=function(a,b){this.value[0]+=(a.x-this.value[0])*b;this.value[1]+=(a.y-this.value[1])*b;this.value[2]+=(a.z-this.value[2])*b;this.value[3]+=
+(a.w-this.value[3])*b;return this};b.prototype.lengthOfXYZ=function(){return Math.sqrt(this.value[0]*this.value[0]+this.value[1]*this.value[1]+this.value[2]*this.value[2])};b.prototype.clone=function(){return new GLOW.Vector4(this.value[0],this.value[1],this.value[2],this.value[3])};return b}();
+GLOW.Matrix3=function(){function b(){this.value=new Float32Array(9);this.identity()}b.prototype.set=function(a,b,f,e,g,h,i,j,k){this.value[0]=a;this.value[3]=b;this.value[6]=f;this.value[1]=e;this.value[4]=g;this.value[7]=h;this.value[2]=i;this.value[5]=j;this.value[8]=k;return this};b.prototype.identity=function(){this.set(1,0,0,0,1,0,0,0,1);return this};b.prototype.extractFromMatrix4=function(a){this.set(a.value[0],a.value[4],a.value[8],a.value[1],a.value[5],a.value[9],a.value[2],a.value[6],a.value[10]);
+return this};b.prototype.multiplyVector3=function(a){var b=a.value[0],f=a.value[1],e=a.value[2];a.value[0]=this.value[0]*b+this.value[3]*f+this.value[6]*e;a.value[1]=this.value[1]*b+this.value[4]*f+this.value[7]*e;a.value[2]=this.value[2]*b+this.value[5]*f+this.value[8]*e;return a};return b}();
+GLOW.Matrix4=function(){function b(){this.value=new Float32Array(16);this.rotation=new GLOW.Vector3;this.position=new GLOW.Vector3;this.columnX=new GLOW.Vector3;this.columnY=new GLOW.Vector3;this.columnZ=new GLOW.Vector3;this.identity()}b.prototype.set=function(a,b,f,e,g,h,i,j,k,l,m,o,n,r,p,q){this.value[0]=a;this.value[4]=b;this.value[8]=f;this.value[12]=e;this.value[1]=g;this.value[5]=h;this.value[9]=i;this.value[13]=j;this.value[2]=k;this.value[6]=l;this.value[10]=m;this.value[14]=o;this.value[3]=
+n;this.value[7]=r;this.value[11]=p;this.value[15]=q;return this};b.prototype.identity=function(){this.set(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1);return this};b.prototype.copy=function(a){a=a.value;this.set(a[0],a[4],a[8],a[12],a[1],a[5],a[9],a[13],a[2],a[6],a[10],a[14],a[3],a[7],a[11],a[15]);return this};b.prototype.lookAt=function(a,b){var f=GLOW.Matrix4.tempVector3A,e=GLOW.Matrix4.tempVector3B,g=GLOW.Matrix4.tempVector3C,h=this.getPosition();h.value[0]=this.value[12];h.value[1]=this.value[13];h.value[2]=
+this.value[14];g.sub(h,a).normalize();g.length()===0&&(g.value[3]=1);f.cross(b,g).normalize();f.length()===0&&(g.value[0]+=1.0E-4,f.cross(b,g).normalize());e.cross(g,f).normalize();f=f.value;e=e.value;g=g.value;this.value[0]=f[0];this.value[4]=e[0];this.value[8]=g[0];this.value[1]=f[1];this.value[5]=e[1];this.value[9]=g[1];this.value[2]=f[2];this.value[6]=e[2];this.value[10]=g[2];return this};b.prototype.multiplyVector3=function(a){var b=a.value[0],f=a.value[1],e=a.value[2],g=1/(this.value[3]*b+this.value[7]*
+f+this.value[11]*e+this.value[15]);a.value[0]=(this.value[0]*b+this.value[4]*f+this.value[8]*e+this.value[12])*g;a.value[1]=(this.value[1]*b+this.value[5]*f+this.value[9]*e+this.value[13])*g;a.value[2]=(this.value[2]*b+this.value[6]*f+this.value[10]*e+this.value[14])*g;return a};b.prototype.multiplyVector4=function(a){var b=a.value[0],f=a.value[1],e=a.value[2],g=a.value[3];a.value[0]=this.value[0]*b+this.value[4]*f+this.value[8]*e+this.value[12]*g;a.value[1]=this.value[1]*b+this.value[5]*f+this.value[9]*
+e+this.value[13]*g;a.value[2]=this.value[2]*b+this.value[6]*f+this.value[10]*e+this.value[14]*g;a.value[3]=this.value[3]*b+this.value[7]*f+this.value[11]*e+this.value[15]*g;return a};b.prototype.rotateAxis=function(a){var b=a.value[0],f=a.value[1],e=a.value[2];a.value[0]=b*this.value[0]+f*this.value[4]+e*this.value[8];a.value[1]=b*this.value[1]+f*this.value[5]+e*this.value[9];a.value[2]=b*this.value[2]+f*this.value[6]+e*this.value[10];a.normalize();return a};b.prototype.crossVector=function(a){var b=
+GLOW.Vector4(),f=a.value[0],e=a.value[1],g=a.value[2],a=a.value[3];b.value[0]=this.value[0]*f+this.value[4]*e+this.value[8]*g+this.value[12]*a;b.value[1]=this.value[1]*f+this.value[5]*e+this.value[9]*g+this.value[13]*a;b.value[2]=this.value[2]*f+this.value[6]*e+this.value[10]*g+this.value[14]*a;b.value[3]=a?this.value[3]*f+this.value[7]*e+this.value[11]*g+this.value[15]*a:1;return b};b.prototype.multiply=function(a,b){var a=a.value,b=b.value,f=a[0],e=a[4],g=a[8],h=a[12],i=a[1],j=a[5],k=a[9],l=a[13],
+m=a[2],o=a[6],n=a[10],r=a[14],p=a[3],q=a[7],s=a[11],t=a[15],u=b[0],v=b[4],x=b[8],w=b[12],y=b[1],z=b[5],A=b[9],B=b[13],C=b[2],D=b[6],E=b[10],F=b[14];this.value[0]=f*u+e*y+g*C;this.value[4]=f*v+e*z+g*D;this.value[8]=f*x+e*A+g*E;this.value[12]=f*w+e*B+g*F+h;this.value[1]=i*u+j*y+k*C;this.value[5]=i*v+j*z+k*D;this.value[9]=i*x+j*A+k*E;this.value[13]=i*w+j*B+k*F+l;this.value[2]=m*u+o*y+n*C;this.value[6]=m*v+o*z+n*D;this.value[10]=m*x+o*A+n*E;this.value[14]=m*w+o*B+n*F+r;this.value[3]=p*u+q*y+s*C;this.value[7]=
+p*v+q*z+s*D;this.value[11]=p*x+q*A+s*E;this.value[15]=p*w+q*B+s*F+t;return this};b.prototype.multiplySelf=function(a){this.multiply(this,a);return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[4]*=a;this.value[8]*=a;this.value[12]*=a;this.value[1]*=a;this.value[5]*=a;this.value[9]*=a;this.value[13]*=a;this.value[2]*=a;this.value[6]*=a;this.value[10]*=a;this.value[14]*=a;this.value[3]*=a;this.value[7]*=a;this.value[11]*=a;this.value[15]*=a;return this};b.prototype.determinant=
+function(){var a=this.value[0],b=this.value[4],f=this.value[8],e=this.value[12],g=this.value[1],h=this.value[5],i=this.value[9],j=this.value[13],k=this.value[2],l=this.value[6],m=this.value[10],o=this.value[14],n=this.value[3],r=this.value[7],p=this.value[11],q=this.value[15];return e*i*l*n-f*j*l*n-e*h*m*n+b*j*m*n+f*h*o*n-b*i*o*n-e*i*k*r+f*j*k*r+e*g*m*r-a*j*m*r-f*g*o*r+a*i*o*r+e*h*k*p-b*j*k*p-e*g*l*p+a*j*l*p+b*g*o*p-a*h*o*p-f*h*k*q+b*i*k*q+f*g*l*q-a*i*l*q-b*g*m*q+a*h*m*q};b.prototype.transpose=function(){var a;
+a=this.value[1];this.value[1]=this.value[4];this.value[4]=a;a=this.value[2];this.value[2]=this.value[8];this.value[8]=a;a=this.value[6];this.value[6]=this.value[9];this.value[9]=a;a=this.value[3];this.value[3]=this.value[12];this.value[12]=a;a=this.value[7];this.value[7]=this.value[13];this.value[13]=a;a=this.value[11];this.value[11]=this.value[14];this.value[11]=a;return this};b.prototype.clone=function(){var a=new GLOW.Matrix4;a.value=new Float32Array(this.value);return a};b.prototype.setPosition=
+function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[12]=e;this.value[13]=b;this.value[14]=f;return this};b.prototype.addPosition=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[12]+=e;this.value[13]+=b;this.value[14]+=f};b.prototype.setRotation=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);var a=Math.cos(b),b=Math.sin(b),g=Math.cos(f),f=Math.sin(f),h=Math.cos(e);
+e=Math.sin(e);this.value[0]=a*g;this.value[4]=b*e-a*f*h;this.value[8]=a*f*e+b*h;this.value[1]=f;this.value[5]=g*h;this.value[9]=-g*e;this.value[2]=-b*g;this.value[6]=b*f*h+a*e;this.value[10]=-b*f*e+a*h;return this};b.prototype.addRotation=function(a,b,f){var e;b!==void 0&&f!==void 0?e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.rotation.value[0]+=e;this.rotation.value[1]+=b;this.rotation.value[2]+=f;this.setRotation(this.rotation.value[0],this.rotation.value[1],this.rotation.value[2])};b.prototype.getPosition=
+function(){this.position.set(this.value[12],this.value[13],this.value[14]);return this.position};b.prototype.getColumnX=function(){this.columnX.set(this.value[0],this.value[1],this.value[2]);return this.columnX};b.prototype.getColumnY=function(){this.columnY.set(this.value[4],this.value[5],this.value[6]);return this.columnY};b.prototype.getColumnZ=function(){this.columnZ.set(this.value[8],this.value[9],this.value[10]);return this.columnZ};b.prototype.scale=function(a,b,f){var e;b!==void 0&&f!==void 0?
+e=a:(e=a.value[0],b=a.value[1],f=a.value[2]);this.value[0]*=e;this.value[4]*=b;this.value[8]*=f;this.value[1]*=e;this.value[5]*=b;this.value[9]*=f;this.value[2]*=e;this.value[6]*=b;this.value[10]*=f;this.value[3]*=e;this.value[7]*=b;this.value[11]*=f;return this};b.prototype.invert=function(){GLOW.Matrix4.makeInverse(this,this);return this};return b}();
+GLOW.Matrix4.makeInverse=function(b,a){a===void 0&&(a=new GLOW.Matrix4);var c=b.value,f=a.value,e=c[0],g=c[4],h=c[8],i=c[12],j=c[1],k=c[5],l=c[9],m=c[13],o=c[2],n=c[6],r=c[10],p=c[14],q=c[3],s=c[7],t=c[11],c=c[15];f[0]=l*p*s-m*r*s+m*n*t-k*p*t-l*n*c+k*r*c;f[1]=m*r*q-l*p*q-m*o*t+j*p*t+l*o*c-j*r*c;f[2]=k*p*q-m*n*q+m*o*s-j*p*s-k*o*c+j*n*c;f[3]=l*n*q-k*r*q-l*o*s+j*r*s+k*o*t-j*n*t;f[4]=i*r*s-h*p*s-i*n*t+g*p*t+h*n*c-g*r*c;f[5]=h*p*q-i*r*q+i*o*t-e*p*t-h*o*c+e*r*c;f[6]=i*n*q-g*p*q-i*o*s+e*p*s+g*o*c-e*n*c;
+f[7]=g*r*q-h*n*q+h*o*s-e*r*s-g*o*t+e*n*t;f[8]=h*m*s-i*l*s+i*k*t-g*m*t-h*k*c+g*l*c;f[9]=i*l*q-h*m*q-i*j*t+e*m*t+h*j*c-e*l*c;f[10]=h*m*q-i*k*q+i*j*s-e*m*s-g*j*c+e*k*c;f[11]=h*k*q-g*l*q-h*j*s+e*l*s+g*j*t-e*k*t;f[12]=i*l*n-h*m*n-i*k*r+g*m*r+h*k*p-g*l*p;f[13]=h*m*o-i*l*o+i*j*r-e*m*r-h*j*p+e*l*p;f[14]=i*k*o-g*m*o-i*j*n+e*m*n+g*j*p-e*k*p;f[15]=g*l*o-h*k*o+h*j*n-e*l*n-g*j*r+e*k*r;a.multiplyScalar(1/b.determinant());return a};
+GLOW.Matrix4.makeFrustum=function(b,a,c,f,e,g,h){var i,h=h||new GLOW.Matrix4;i=h.value;i[0]=2*e/(a-b);i[4]=0;i[8]=(a+b)/(a-b);i[12]=0;i[1]=0;i[5]=2*e/(f-c);i[9]=(f+c)/(f-c);i[13]=0;i[2]=0;i[6]=0;i[10]=-(g+e)/(g-e);i[14]=-2*g*e/(g-e);i[3]=0;i[7]=0;i[11]=-1;i[15]=0;return h};GLOW.Matrix4.makeProjection=function(b,a,c,f,e){var g,b=c*Math.tan(b*Math.PI/360);g=-b;return GLOW.Matrix4.makeFrustum(g*a,b*a,g,b,c,f,e)};
+GLOW.Matrix4.makeOrtho=function(b,a,c,f,e,g,h){var i,j,k,l,h=h||new GLOW.Matrix4;j=Math.abs(a-b);k=Math.abs(c-f);l=Math.abs(g-e);i=h.value;i[0]=2/j;i[4]=0;i[8]=0;i[12]=-((a+b)/j);i[1]=0;i[5]=2/k;i[9]=0;i[13]=-((c+f)/k);i[2]=0;i[6]=0;i[10]=-2/l;i[14]=-((g+e)/l);i[3]=0;i[7]=0;i[11]=0;i[15]=1;return h};GLOW.Matrix4.tempVector3A=new GLOW.Vector3;GLOW.Matrix4.tempVector3B=new GLOW.Vector3;GLOW.Matrix4.tempVector3C=new GLOW.Vector3;GLOW.Matrix4.tempVector3D=new GLOW.Vector3;
+GLOW.Color=function(){function b(a,b,f){this.value=new Float32Array(3);b===void 0&&f===void 0?this.setHex(a||0):this.setRGB(a,b,f)}b.prototype.setRGB=function(a,b,f){this.value[0]=a!==void 0?a/255:1;this.value[1]=b!==void 0?b/255:1;this.value[2]=f!==void 0?f/255:1;return this};b.prototype.setHex=function(a){this.value[0]=((a&16711680)>>16)/255;this.value[1]=((a&65280)>>8)/255;this.value[2]=(a&255)/255;return this};b.prototype.multiplyScalar=function(a){this.value[0]*=a;this.value[1]*=a;this.value[2]*=
+a;return this};b.prototype.mix=function(a,b){var f=1-b;this.value[0]=this.value[0]*f+a.value[0]*b;this.value[1]=this.value[1]*f+a.value[1]*b;this.value[2]=this.value[2]*f+a.value[2]*b;return this};b.prototype.copy=function(a){this.value[0]=a.value[0];this.value[1]=a.value[1];this.value[2]=a.value[2];return this};b.prototype.setHSV=function(a,b,f){var e,g,h,i,j,k;if(f==0)e=g=h=0;else switch(i=Math.floor(a*6),j=a*6-i,a=f*(1-b),k=f*(1-b*j),b=f*(1-b*(1-j)),i){case 1:e=k;g=f;h=a;break;case 2:e=a;g=f;h=
+b;break;case 3:e=a;g=k;h=f;break;case 4:e=b;g=a;h=f;break;case 5:e=f;g=a;h=k;break;case 6:case 0:e=f,g=b,h=a}this.value[0]=e;this.value[1]=g;this.value[2]=h;return this};return b}();
+GLOW.Geometry={randomVector3Array:function(b,a){var a=a!==void 0?a:1,c,f=[],e=a*2;for(c=0;c<b;c++)f.push(GLOW.Vector3(Math.random()*e-a,Math.random()*e-a,Math.random()*e-a));return f},randomArray:function(b,a,c,f){var e=[],g=0,h,i;for(i=0;i<b/f;i++){g=a+Math.random()*c;for(h=0;h<f;h++)e.push(g)}return e},triangles:function(b){return this.elements(b)},elements:function(b){var a=0,c,f=new Uint16Array(b*3);for(c=0;c<b;c++)f[a]=a++,f[a]=a++,f[a]=a++;return f},faceNormals:function(b,a){var c=Array(b.length),
+f,e=a.length,g,h,i,j=new GLOW.Vector3,k=new GLOW.Vector3,l=new GLOW.Vector3,m=new GLOW.Vector3;for(f=0;f<e;)g=a[f++]*3,h=a[f++]*3,i=a[f++]*3,j.set(b[g+0],b[g+1],b[g+2]),k.set(b[h+0],b[h+1],b[h+2]),l.set(b[i+0],b[i+1],b[i+2]),k.subSelf(j),l.subSelf(j),m.cross(k,l).normalize(),c[g+0]=m.value[0],c[g+1]=m.value[1],c[g+2]=m.value[2],c[h+0]=m.value[0],c[h+1]=m.value[1],c[h+2]=m.value[2],c[i+0]=m.value[0],c[i+1]=m.value[1],c[i+2]=m.value[2];return c},flatShade:function(b,a){if(b.triangles===void 0||b.data===
+void 0)GLOW.error("GLOW.Geometry.flatShade: missing .data and/or .triangles in shader config object. Quitting.");else if(a===void 0)GLOW.error("GLOW.Geometry.flatShade: missing attribute data sizes. Quitting.");else{var c=b.triangles,f=c.length/3,e=b.data,g=[],h,i,j,k,l,m,o;for(j in a)if(e[j]){h=e[j];flatShadedAttribute=[];i=a[j];k=0;for(l=f*3;k<l;k++){m=0;for(o=i;m<o;m++)flatShadedAttribute.push(h[c[k]*i+m])}k=h.length=0;for(l=flatShadedAttribute.length;k<l;k++)h[k]=flatShadedAttribute[k]}k=0;l=
+f;for(m=0;k<l;k++)g[m]=m++,g[m]=m++,g[m]=m++;b.triangles=g}}};
+GLOW.Geometry.Cube={vertices:function(b){var a=new Float32Array(72),c=0,b=b!==void 0?b*0.5:5;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;
+a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=+b;a[c++]=-b;a[c++]=-b;a[c++]=+b;return a},indices:function(){var b=new Uint16Array(36),a=0;b[a++]=0;b[a++]=1;b[a++]=2;b[a++]=0;b[a++]=2;b[a++]=3;b[a++]=4;b[a++]=5;b[a++]=6;b[a++]=4;b[a++]=6;b[a++]=7;b[a++]=8;b[a++]=9;b[a++]=
+10;b[a++]=8;b[a++]=10;b[a++]=11;b[a++]=12;b[a++]=13;b[a++]=14;b[a++]=12;b[a++]=14;b[a++]=15;b[a++]=16;b[a++]=17;b[a++]=18;b[a++]=16;b[a++]=18;b[a++]=19;b[a++]=20;b[a++]=21;b[a++]=22;b[a++]=20;b[a++]=22;b[a++]=23;return b},primitives:function(){return GL.TRIANGLES},uvs:function(){var b=new Float32Array(48),a=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=
+0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=0;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=1;b[a++]=0;b[a++]=0;b[a++]=0;return b},normals:function(){return GLOW.Geometry.faceNormals(GLOW.Geometry.Cube.vertices(),GLOW.Geometry.Cube.indices())}};
+GLOW.Geometry.Cylinder={vertices:function(b,a,c,f){b|=7;a|=1;c|=1;f|=1;for(var e=[],g=Math.PI*2,h=f*0.5,f=0;f<b;f++)e.push(Math.sin(g*f/b)*a),e.push(h),e.push(Math.cos(g*f/b)*a);for(f=0;f<b;f++)e.push(Math.sin(g*f/b)*c),e.push(-h),e.push(Math.cos(g*f/b)*c);e.push(0);e.push(h);e.push(0);e.push(0);e.push(-h);e.push(0);return e},indices:function(b){b|=7;var a,c,f,e,g,h=[];for(g=0;g<b;g++)a=g,c=g+b,f=b+(g+1)%b,e=(g+1)%b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);for(g=b;g<b+b*0.5;g++)a=
+2*b,c=(2*g-2*b+0)%b,f=(2*g-2*b+1)%b,e=(2*g-2*b+2)%b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);for(g=b+b*0.5;g<2*b;g++)a=2*b+1,c=(2*g-2*b+2)%b+b,f=(2*g-2*b+1)%b+b,e=(2*g-2*b+0)%b+b,h.push(a),h.push(c),h.push(f),h.push(a),h.push(f),h.push(e);return h},uvs:function(){},primitives:function(){return GL.TRIANGLES},normals:function(b){return GLOW.Geometry.faceNormals(GLOW.Geometry.Cylinder.vertices(b),GLOW.Geometry.Cylinder.indices(b))}};
+GLOW.Geometry.Plane={vertices:function(b,a){var c=new Float32Array(12),f=0,b=b!==void 0?b*0.5:1;a?(c[f++]=-b,c[f++]=0,c[f++]=-b,c[f++]=-b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=-b):(c[f++]=+b,c[f++]=-b,c[f++]=0,c[f++]=+b,c[f++]=+b,c[f++]=0,c[f++]=-b,c[f++]=+b,c[f++]=0,c[f++]=-b,c[f++]=-b,c[f++]=0);return c},indices:function(){var b=new Uint16Array(6),a=0;b[a++]=0;b[a++]=1;b[a++]=2;b[a++]=0;b[a++]=2;b[a++]=3;return b},uvs:function(b){var a=new Float32Array(8),c=0;
+b?(a[c++]=0,a[c++]=0,a[c++]=0,a[c++]=1,a[c++]=1,a[c++]=1,a[c++]=1):(a[c++]=1,a[c++]=0,a[c++]=1,a[c++]=1,a[c++]=0,a[c++]=1,a[c++]=0);a[c++]=0;return a},primitives:function(){return GL.TRIANGLES}};
+GLOW.Node=function(b){this.localMatrix=new GLOW.Matrix4;this.globalMatrix=new GLOW.Matrix4;this.viewMatrix=new GLOW.Matrix4;this.updateRotationMatrix=!1;this.rotationMatrix=new GLOW.Matrix3;this.useXYZStyleTransform=!1;this.position={x:0,y:0,z:0};this.rotation={x:0,y:0,z:0};this.scale={x:1,y:1,z:1};this.children=[];this.parent=void 0;if(b)this.shader=b,this.draw=b.draw};
+GLOW.Node.prototype.update=function(b,a){this.useXYZStyleTransform&&(this.localMatrix.setPosition(this.position.x,this.position.y,this.position.z),this.localMatrix.setRotation(this.rotation.x,this.rotation.y,this.rotation.z),this.localMatrix.scale(this.scale.x,this.scale.y,this.scale.z));b?this.globalMatrix.multiply(b,this.localMatrix):this.globalMatrix.copy(this.localMatrix);this.updateRotationMatrix&&this.rotationMatrix.extractFromMatrix4(this.globalMatrix);a&&this.viewMatrix.multiply(a,this.globalMatrix);
+var c,f=this.children.length;for(c=0;c<f;c++)this.children[c].update(this.globalMatrix,a);return this};GLOW.Node.prototype.addChild=function(b){if(this.children.indexOf(b)===-1)this.children.push(b),b.parent&&b.parent.removeChild(b),b.parent=this;return this};GLOW.Node.prototype.removeChild=function(b){var a=this.children.indexOf(b);if(a!==-1)this.children.splice(1,a),b.parent=void 0;return this};
+GLOW.Camera=function(b){GLOW.Node.call(this);b=b!==void 0?b:{};this.fov=b.fov!==void 0?b.fov:40;this.aspect=b.aspect!==void 0?b.aspect:window.innerWidth/window.innerHeight;this.near=b.near!==void 0?b.near:0.1;this.far=b.far!==void 0?b.far:1E4;this.useTarget=b.useTarget!==void 0?b.useTarget:!0;this.projection=b.ortho!==void 0?GLOW.Matrix4.makeOrtho(b.ortho.left,b.ortho.right,b.ortho.top,b.ortho.bottom,this.near,this.far):GLOW.Matrix4.makeProjection(this.fov,this.aspect,this.near,this.far);this.inverse=
+new GLOW.Matrix4;this.target=new GLOW.Vector3(0,0,-100);this.up=new GLOW.Vector3(0,1,0);this.update()};GLOW.Camera.prototype=new GLOW.Node;GLOW.Camera.prototype.constructor=GLOW.Camera;GLOW.Camera.prototype.supr=GLOW.Node.prototype;
+GLOW.Camera.prototype.update=function(b,a){this.useXYZStyleTransform?(this.localMatrix.setPosition(this.position.x,this.position.y,this.position.z),this.useTarget?this.localMatrix.lookAt(this.target,this.up):this.localMatrix.setRotation(this.rotation.x,this.rotation.y,this.rotation.z),this.localMatrix.scale(this.scale.x,this.scale.y,this.scale.z)):this.useTarget&&this.localMatrix.lookAt(this.target,this.up);b?this.globalMatrix.multiply(b,this.localMatrix):this.globalMatrix.copy(this.localMatrix);
+GLOW.Matrix4.makeInverse(this.globalMatrix,this.inverse);var c,f=this.children.length;for(c=0;c<f;c++)this.children[c].update(this.globalMatrix,a)};GLOW.defaultCamera=new GLOW.Camera;
+GLOW.Load=function(){function b(a){this.parameters=a;this.onLoadComplete=void 0;this.onLoadContext=null;this.onLoadItem=void 0;this.numItemsLeftToLoad=this.numItemsToLoad=0;for(var b in a)b!=="onLoadComplete"&&b!=="onLoadItem"&&b!=="dontParseJS"&&b!="onLoadContext"?this.numItemsToLoad++:(this[b]=a[b],delete a[b]);this.numItemsLeftToLoad=this.numItemsToLoad;for(b in a){var f=a[b],e=a[b];e.indexOf(".png")!==-1||e.indexOf(".gif")!==-1||e.indexOf(".jpg")!==-1||e.indexOf("jpeg")!==-1?(a[b]=new Image,a[b].scope=
+this,a[b].onload=this.onLoadImage,a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].src=f):e.indexOf(".glsl")!==-1?(a[b]=new XMLHttpRequest,a[b].scope=this,a[b].parametersProperty=b,a[b].open("GET",f),a[b].onreadystatechange=this.onLoadGLSL,a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].send()):e.indexOf(".js")!==-1||e.indexOf(".json")!==-1?(a[b]=new XMLHttpRequest,a[b].scope=this,a[b].parametersProperty=b,a[b].open("GET",f),a[b].onreadystatechange=this.onLoadJSON,
+a[b].onerror=this.onLoadError,a[b].onabort=this.onLoadError,a[b].send()):(a[b]=document.createElement("video"),a[b].scope=this,a[b].addEventListener("loadeddata",this.onLoadVideo,!1),a[b].src=f)}}b.prototype.handleLoadedItem=function(){this.numItemsLeftToLoad--;this.onLoadItem!==void 0&&this.onLoadItem.call(this.onLoadContext,1-this.numItemsLeftToLoad/this.numItemsToLoad);this.numItemsLeftToLoad<=0&&this.onLoadComplete.call(this.onLoadContext,this.parameters)};b.prototype.onLoadJSON=function(){this.readyState===
+4&&(this.scope.parameters[this.parametersProperty]=JSON.parse(this.responseText),this.scope.handleLoadedItem())};b.prototype.onLoadImage=function(){this.scope.handleLoadedItem()};b.prototype.onLoadVideo=function(){this.removeEventListener("loadeddata",this.scope.onLoadVideo,!1);this.scope.handleLoadedItem()};b.prototype.onLoadGLSL=function(){if(this.readyState===4){for(var a="",b="",b=this.responseText.split("\n"),f="",e=0;e<b.length;e++)if(b[e].indexOf("//#")>-1)b[e].indexOf("Fragment")>-1&&(a=f,
+f="");else{var g=b[e];g.indexOf("//")>-1&&(g=g.substring(0,g.indexOf("//")));g.indexOf(";")===-1&&(g+="\n");f+=g}this.scope.parameters[this.parametersProperty]={fragmentShader:"#ifdef GL_ES\nprecision highp float;\n#endif\n"+f,vertexShader:a};this.scope.handleLoadedItem()}};b.prototype.onLoadError=function(a){GLOW.error("GLOW.Load.onLoadError: Error "+a.target.status)};b.prototype.parseThreeJS=function(a){var b={},f=a.scale!==void 0?1/a.scale:1;(function(e){if(a.version===void 0||a.version!=2)GLOW.error("Deprecated file format.");
+else{var f,h,i,j,k,l,m,o,n,r,p,q,s,t,u=a.faces;l=a.vertices;var v=a.normals,x=a.colors,w=0;for(f=0;f<a.uvs.length;f++)a.uvs[f].length&&w++;for(f=0;f<w;f++)b.faceUvs[f]=[],b.faceVertexUvs[f]=[];j=0;for(k=l.length;j<k;)m=new THREE.Vertex,m.position.x=l[j++]*e,m.position.y=l[j++]*e,m.position.z=l[j++]*e,b.vertices.push(m);j=0;for(k=u.length;j<k;){e=u[j++];l=e&1;i=e&2;f=e&4;h=e&8;o=e&16;m=e&32;r=e&64;e&=128;l?(p=new THREE.Face4,p.a=u[j++],p.b=u[j++],p.c=u[j++],p.d=u[j++],l=4):(p=new THREE.Face3,p.a=u[j++],
+p.b=u[j++],p.c=u[j++],l=3);if(i)i=u[j++],p.materials=b.materials[i];i=b.faces.length;if(f)for(f=0;f<w;f++)q=a.uvs[f],n=u[j++],t=q[n*2],n=q[n*2+1],b.faceUvs[f][i]=new THREE.UV(t,n);if(h)for(f=0;f<w;f++){q=a.uvs[f];s=[];for(h=0;h<l;h++)n=u[j++],t=q[n*2],n=q[n*2+1],s[h]=new THREE.UV(t,n);b.faceVertexUvs[f][i]=s}if(o)o=u[j++]*3,h=new THREE.Vector3,h.x=v[o++],h.y=v[o++],h.z=v[o],p.normal=h;if(m)for(f=0;f<l;f++)o=u[j++]*3,h=new THREE.Vector3,h.x=v[o++],h.y=v[o++],h.z=v[o],p.vertexNormals.push(h);if(r)m=
+u[j++],m=new THREE.Color(x[m]),p.color=m;if(e)for(f=0;f<l;f++)m=u[j++],m=new THREE.Color(x[m]),p.vertexColors.push(m);b.faces.push(p)}}})(f);(function(){var e,f,h,i;if(a.skinWeights){e=0;for(f=a.skinWeights.length;e<f;e+=2)h=a.skinWeights[e],i=a.skinWeights[e+1],b.skinWeights.push(new THREE.Vector4(h,i,0,0))}if(a.skinIndices){e=0;for(f=a.skinIndices.length;e<f;e+=2)h=a.skinIndices[e],i=a.skinIndices[e+1],b.skinIndices.push(new THREE.Vector4(h,i,0,0))}b.bones=a.bones;b.animation=a.animation})();(function(e){if(a.morphTargets!==
+void 0){var f,h,i,j,k,l,m,o,n;f=0;for(h=a.morphTargets.length;f<h;f++){b.morphTargets[f]={};b.morphTargets[f].name=a.morphTargets[f].name;b.morphTargets[f].vertices=[];o=b.morphTargets[f].vertices;n=a.morphTargets[f].vertices;i=0;for(j=n.length;i<j;i+=3)k=n[i]*e,l=n[i+1]*e,m=n[i+2]*e,o.push(new THREE.Vertex(new THREE.Vector3(k,l,m)))}}if(a.morphColors!==void 0){f=0;for(h=a.morphColors.length;f<h;f++){b.morphColors[f]={};b.morphColors[f].name=a.morphColors[f].name;b.morphColors[f].colors=[];j=b.morphColors[f].colors;
+k=a.morphColors[f].colors;e=0;for(i=k.length;e<i;e+=3)l=new THREE.Color(16755200),l.setRGB(k[e],k[e+1],k[e+2]),j.push(l)}}})(f);(function(){if(a.edges!==void 0){var e,f,h;for(e=0;e<a.edges.length;e+=2)f=a.edges[e],h=a.edges[e+1],b.edges.push(new THREE.Edge(b.vertices[f],b.vertices[h],f,h))}})()};return b}();
+GLOW.ShaderUtils={createMultiple:function(b,a){if(b.triangles===void 0||b.data===void 0)GLOW.error("GLOW.ShaderUtils.createMultiple: missing .data and/or .triangles in shader config object. Quitting.");else{var c,f=b.triangles,e=b.data,g,h=[],i,j,k,l,m,o,n=0,r=f.length;do{h.push(g={elements:[]});c=g.elements;for(k in a)if(e[k])g[k]=[];else{GLOW.error("GLOW.ShaderUtils.createMultiple: attribute "+d+" doesn't exist in originalShaderConfig.data. Quitting.");return}for(j=0;n<r;n+=3){if(j>65533){n-=3;
+break}c[j]=j++;c[j]=j++;c[j]=j++;for(k in a){i=e[k];size=a[k];for(o=0;o<3;o++){l=0;for(m=size;l<m;l++)g[k].push(i[f[n+o]*size+l])}}}}while(n<r);for(k in a)b.data[k]=h[0][k];b.triangles=h[0].elements;c=new GLOW.Shader(b);f=[c];for(n=1;n<h.length;n++){for(k in a)b.data[k]=h[n][k];e=GLOW.Compiler.createAttributes(GLOW.Compiler.extractAttributes(c.compiledData.program),b.data,b.usage,b.interleave);e=GLOW.Compiler.interleaveAttributes(e,b.interleave);for(l in e)h[n][l]=e[l];f[n]=c.clone(h[n])}return f}}};
+exports.GLOW = GLOW;
+
+},{}],6:[function(require,module,exports){
+var astw = require('astw');
+
+module.exports = function (src) {
+    var locals = {};
+    var implicit = {};
+    var exported = {};
+    
+    src = String(src).replace(/^#![^\n]*\n/, '');
+    var walk = astw(src);
+    
+    walk(function (node) {
+        if (node.type === 'VariableDeclaration') {
+            // take off the leading `var `
+            var id = getScope(node);
+            for (var i = 0; i < node.declarations.length; i++) {
+                var d = node.declarations[i];
+                locals[id][d.id.name] = d;
+            }
+        }
+        else if (isFunction(node)) {
+            var id = getScope(node.parent);
+            if (node.id) locals[id][node.id.name] = node;
+            var nid = node.params.length && getScope(node);
+            if (nid && !locals[nid]) locals[nid] = {};
+            for (var i = 0; i < node.params.length; i++) {
+                var p = node.params[i];
+                locals[nid][p.name] = p;
+            }
+        }
+    });
+    
+    walk(function (node) {
+        if (node.type === 'Identifier'
+        && lookup(node) === undefined) {
+            if (node.parent.type === 'Property'
+            && node.parent.key === node) return;
+            if (node.parent.type === 'MemberExpression'
+            && node.parent.property === node) return;
+            if (isFunction(node.parent)) return;
+            if (node.parent.type === 'LabeledStatement') return;
+            if (node.parent.type === 'ContinueStatement') return;
+            if (node.parent.type === 'BreakStatement') return;
+         
+            if (node.parent.type === 'AssignmentExpression') {
+                var isLeft0 = node.parent.left.type === 'MemberExpression'
+                    && node.parent.left.object === node.name
+                ;
+                var isLeft1 = node.parent.left.type === 'Identifier'
+                    && node.parent.left.name === node.name
+                ;
+                if (isLeft0 || isLeft1) {
+                    exported[node.name] = keyOf(node).length;
+                }
+            }
+            if (!exported[node.name]
+            || exported[node.name] < keyOf(node).length) {
+                implicit[node.name] = keyOf(node).length;
+            }
+        }
+    });
+    
+    var localScopes = {};
+    var lks = objectKeys(locals);
+    for (var i = 0; i < lks.length; i++) {
+        var key = lks[i];
+        localScopes[key] = objectKeys(locals[key]);
+    }
+    
+    return {
+        locals: localScopes,
+        globals: {
+            implicit: objectKeys(implicit),
+            exported: objectKeys(exported)
+        }
+    };
+    
+    function lookup (node) {
+        for (var p = node; p; p = p.parent) {
+            if (isFunction(p) || p.type === 'Program') {
+                var id = getScope(p);
+                if (locals[id][node.name]) {
+                    return id;
+                }
+            }
+        }
+        return undefined;
+    }
+    
+    function getScope (node) {
+        for (
+            var p = node;
+            !isFunction(p) && p.type !== 'Program';
+            p = p.parent
+        );
+        var id = idOf(p);
+        if (!locals[id]) locals[id] = {};
+        return id;
+    }
+    
+};
+
+function isFunction (x) {
+    return x.type === 'FunctionDeclaration'
+        || x.type === 'FunctionExpression'
+    ;
+}
+
+function idOf (node) {
+    var id = [];
+    for (var n = node; n.type !== 'Program'; n = n.parent) {
+        var key = keyOf(n).join('.');
+        id.unshift(key);
+    }
+    return id.join('.');
+}
+
+function keyOf (node) {
+    var p = node.parent;
+    var ks = objectKeys(p);
+    var kv = { keys : [], values : [], top : [] };
+    
+    for (var i = 0; i < ks.length; i++) {
+        var key = ks[i];
+        kv.keys.push(key);
+        kv.values.push(p[key]);
+        kv.top.push(undefined);
+        
+        if (isArray(p[key])) {
+            var keys = objectKeys(p[key]);
+            kv.keys.push.apply(kv.keys, keys);
+            kv.values.push.apply(kv.values, p[key]);
+            
+            var nkeys = [];
+            for (var j = 0; j < keys.length; j++) nkeys.push(key);
+            kv.top.push.apply(kv.top, nkeys);
+        }
+    }
+    var ix = indexOf(kv.values, node);
+    var res = [];
+    if (kv.top[ix]) res.push(kv.top[ix]);
+    if (kv.keys[ix]) res.push(kv.keys[ix]);
+    if (node.parent.type === 'CallExpression') {
+        res.unshift.apply(res, keyOf(node.parent.parent));
+    }
+    return res;
+}
+
+var isArray = Array.isArray || function (xs) {
+    return Object.prototype.toString.call(xs) === '[object Array]';
+};
+
+var objectKeys = Object.keys || function (obj) {
+    var keys = [];
+    for (var key in obj) keys.push(key);
+    return keys;
+};
+
+function indexOf (xs, x) {
+    if (xs.indexOf) return xs.indexOf(x);
+    for (var i = 0; i < xs.length; i++) {
+        if (x === xs[i]) return i;
+    }
+    return -1;
+}
+
+},{"astw":18}],10:[function(require,module,exports){
+"use strict"
+
+var hashInt       = require("hash-int")
+  , float2Int     = require("float-bits").toInt
+  , UINT_MAX      = 4294967295.0
+  , HASH_CONSTANT = 0x7997F879
+  , DOUBLE_VIEW   = new Float64Array(1)
+  , INT_VIEW      = new Uint32Array(DOUBLE_VIEW.buffer)
+
+function hashDouble(x, y) {
+  DOUBLE_VIEW[0] = +x
+  return hashInt(INT_VIEW[0] + hashInt(INT_VIEW[1]+y))
+}
+
+function noise1f(x) {
+  return (+(hashInt(float2Int(x)+HASH_CONSTANT)>>>0)) / UINT_MAX
+}
+
+function noise2f(x, y) {
+  return (+(hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT))>>>0)) / UINT_MAX
+}
+
+function noise3f(x,y,z) {
+  return (+(hashInt(float2Int(z)+hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT)))>>>0)) / UINT_MAX
+}
+
+function noise4f(x,y,z,t) {
+  return (+(hashInt(float2Int(t)+hashInt(float2Int(z)+hashInt(float2Int(y)+hashInt(float2Int(x)+HASH_CONSTANT)))>>>0))) / UINT_MAX
+}
+
+function noiseNf() {
+  var n = arguments.length
+    , r = HASH_CONSTANT
+  for(var i=0; i<n; ++i) {
+    r = hashInt(r + float2Int(arguments[i]))
+  }
+  return (+r) / UINT_MAX
+}
+
+function noise1d(x) {
+  return +(hashDouble(x, HASH_CONSTANT)>>>0) / UINT_MAX
+}
+
+function noise2d(x, y) {
+  return +(hashDouble(y, hashDouble(x, HASH_CONSTANT))>>>0) / UINT_MAX
+}
+
+function noise3d(x, y, z) {
+  return +(hashDouble(z, hashDouble(y, hashDouble(x, HASH_CONSTANT)))>>>0) / UINT_MAX
+}
+
+function noise4d(x, y, z, t) {
+  return +(hashDouble(t, hashDouble(z, hashDouble(y, hashDouble(x, HASH_CONSTANT))))>>>0) / UINT_MAX
+}
+
+function noiseNd() {
+  var n = arguments.length
+    , r = HASH_CONSTANT
+  for(var i=0; i<n; ++i) {
+    r = hashDouble(arguments[i], r)
+  }
+  return +(r>>>0) / UINT_MAX
+}
+
+module.exports         = noiseNd
+module.exports.noise1d = noise1d
+module.exports.noise2d = noise2d
+module.exports.noise3d = noise3d
+module.exports.noise4d = noise4d
+module.exports.noiseNd = noiseNd
+module.exports.noise1f = noise1f
+module.exports.noise2f = noise2f
+module.exports.noise3f = noise3f
+module.exports.noise4f = noise4f
+module.exports.noiseNf = noiseNf
+
+},{"hash-int":19,"float-bits":20}],21:[function(require,module,exports){
+// shim for using process in browser
+
+var process = module.exports = {};
+
+process.nextTick = (function () {
+    var canSetImmediate = typeof window !== 'undefined'
+    && window.setImmediate;
+    var canPost = typeof window !== 'undefined'
+    && window.postMessage && window.addEventListener
+    ;
+
+    if (canSetImmediate) {
+        return function (f) { return window.setImmediate(f) };
+    }
+
+    if (canPost) {
+        var queue = [];
+        window.addEventListener('message', function (ev) {
+            if (ev.source === window && ev.data === 'process-tick') {
+                ev.stopPropagation();
+                if (queue.length > 0) {
+                    var fn = queue.shift();
+                    fn();
+                }
+            }
+        }, true);
+
+        return function nextTick(fn) {
+            queue.push(fn);
+            window.postMessage('process-tick', '*');
+        };
+    }
+
+    return function nextTick(fn) {
+        setTimeout(fn, 0);
+    };
+})();
+
+process.title = 'browser';
+process.browser = true;
+process.env = {};
+process.argv = [];
+
+process.binding = function (name) {
+    throw new Error('process.binding is not supported');
+}
+
+// TODO(shtylman)
+process.cwd = function () { return '/' };
+process.chdir = function (dir) {
+    throw new Error('process.chdir is not supported');
+};
+
+},{}],22:[function(require,module,exports){
+(function(process){if (!process.EventEmitter) process.EventEmitter = function () {};
+
+var EventEmitter = exports.EventEmitter = process.EventEmitter;
+var isArray = typeof Array.isArray === 'function'
+    ? Array.isArray
+    : function (xs) {
+        return Object.prototype.toString.call(xs) === '[object Array]'
+    }
+;
+function indexOf (xs, x) {
+    if (xs.indexOf) return xs.indexOf(x);
+    for (var i = 0; i < xs.length; i++) {
+        if (x === xs[i]) return i;
+    }
+    return -1;
+}
+
+// By default EventEmitters will print a warning if more than
+// 10 listeners are added to it. This is a useful default which
+// helps finding memory leaks.
+//
+// Obviously not all Emitters should be limited to 10. This function allows
+// that to be increased. Set to zero for unlimited.
+var defaultMaxListeners = 10;
+EventEmitter.prototype.setMaxListeners = function(n) {
+  if (!this._events) this._events = {};
+  this._events.maxListeners = n;
+};
+
+
+EventEmitter.prototype.emit = function(type) {
+  // If there is no 'error' event listener then throw.
+  if (type === 'error') {
+    if (!this._events || !this._events.error ||
+        (isArray(this._events.error) && !this._events.error.length))
+    {
+      if (arguments[1] instanceof Error) {
+        throw arguments[1]; // Unhandled 'error' event
+      } else {
+        throw new Error("Uncaught, unspecified 'error' event.");
+      }
+      return false;
+    }
+  }
+
+  if (!this._events) return false;
+  var handler = this._events[type];
+  if (!handler) return false;
+
+  if (typeof handler == 'function') {
+    switch (arguments.length) {
+      // fast cases
+      case 1:
+        handler.call(this);
+        break;
+      case 2:
+        handler.call(this, arguments[1]);
+        break;
+      case 3:
+        handler.call(this, arguments[1], arguments[2]);
+        break;
+      // slower
+      default:
+        var args = Array.prototype.slice.call(arguments, 1);
+        handler.apply(this, args);
+    }
+    return true;
+
+  } else if (isArray(handler)) {
+    var args = Array.prototype.slice.call(arguments, 1);
+
+    var listeners = handler.slice();
+    for (var i = 0, l = listeners.length; i < l; i++) {
+      listeners[i].apply(this, args);
+    }
+    return true;
+
+  } else {
+    return false;
+  }
+};
+
+// EventEmitter is defined in src/node_events.cc
+// EventEmitter.prototype.emit() is also defined there.
+EventEmitter.prototype.addListener = function(type, listener) {
+  if ('function' !== typeof listener) {
+    throw new Error('addListener only takes instances of Function');
+  }
+
+  if (!this._events) this._events = {};
+
+  // To avoid recursion in the case that type == "newListeners"! Before
+  // adding it to the listeners, first emit "newListeners".
+  this.emit('newListener', type, listener);
+
+  if (!this._events[type]) {
+    // Optimize the case of one listener. Don't need the extra array object.
+    this._events[type] = listener;
+  } else if (isArray(this._events[type])) {
+
+    // Check for listener leak
+    if (!this._events[type].warned) {
+      var m;
+      if (this._events.maxListeners !== undefined) {
+        m = this._events.maxListeners;
+      } else {
+        m = defaultMaxListeners;
+      }
+
+      if (m && m > 0 && this._events[type].length > m) {
+        this._events[type].warned = true;
+        console.error('(node) warning: possible EventEmitter memory ' +
+                      'leak detected. %d listeners added. ' +
+                      'Use emitter.setMaxListeners() to increase limit.',
+                      this._events[type].length);
+        console.trace();
+      }
+    }
+
+    // If we've already got an array, just append.
+    this._events[type].push(listener);
+  } else {
+    // Adding the second element, need to change to array.
+    this._events[type] = [this._events[type], listener];
+  }
+
+  return this;
+};
+
+EventEmitter.prototype.on = EventEmitter.prototype.addListener;
+
+EventEmitter.prototype.once = function(type, listener) {
+  var self = this;
+  self.on(type, function g() {
+    self.removeListener(type, g);
+    listener.apply(this, arguments);
+  });
+
+  return this;
+};
+
+EventEmitter.prototype.removeListener = function(type, listener) {
+  if ('function' !== typeof listener) {
+    throw new Error('removeListener only takes instances of Function');
+  }
+
+  // does not use listeners(), so no side effect of creating _events[type]
+  if (!this._events || !this._events[type]) return this;
+
+  var list = this._events[type];
+
+  if (isArray(list)) {
+    var i = indexOf(list, listener);
+    if (i < 0) return this;
+    list.splice(i, 1);
+    if (list.length == 0)
+      delete this._events[type];
+  } else if (this._events[type] === listener) {
+    delete this._events[type];
+  }
+
+  return this;
+};
+
+EventEmitter.prototype.removeAllListeners = function(type) {
+  if (arguments.length === 0) {
+    this._events = {};
+    return this;
+  }
+
+  // does not use listeners(), so no side effect of creating _events[type]
+  if (type && this._events && this._events[type]) this._events[type] = null;
+  return this;
+};
+
+EventEmitter.prototype.listeners = function(type) {
+  if (!this._events) this._events = {};
+  if (!this._events[type]) this._events[type] = [];
+  if (!isArray(this._events[type])) {
+    this._events[type] = [this._events[type]];
+  }
+  return this._events[type];
+};
+
+})(require("__browserify_process"))
+},{"__browserify_process":21}],19:[function(require,module,exports){
+"use strict"
+
+var A
+if(typeof Uint32Array === undefined) {
+  A = [ 0 ]
+} else {
+  A = new Uint32Array(1)
+}
+
+function hashInt(x) {
+  A[0]  = x|0
+  A[0] -= (A[0]<<6)
+  A[0] ^= (A[0]>>>17)
+  A[0] -= (A[0]<<9)
+  A[0] ^= (A[0]<<4)
+  A[0] -= (A[0]<<3)
+  A[0] ^= (A[0]<<10)
+  A[0] ^= (A[0]>>>15)
+  return A[0]
+}
+
+module.exports = hashInt
+
+},{}],20:[function(require,module,exports){
+"use strict"
+
+var FLOAT_VIEW  = new Float32Array(1)
+  , INT_VIEW    = new Int32Array(FLOAT_VIEW.buffer)
+  , UINT_VIEW   = new Uint32Array(FLOAT_VIEW.buffer)
+
+function floatToInt(x) {
+  FLOAT_VIEW[0] = x
+  return INT_VIEW[0]
+}
+
+function intToFloat(x) {
+  INT_VIEW[0] = x
+  return FLOAT_VIEW[0]
+}
+
+function floatToUint(x) {
+  FLOAT_VIEW[0] = x
+  return UINT_VIEW[0]
+}
+
+function uintToFloat(x) {
+  UINT_VIEW[0] = x
+  return FLOAT_VIEW[0]
+}
+
+module.exports = floatToInt
+module.exports.toInt = floatToInt
+module.exports.fromInt = intToFloat
+module.exports.toUint = floatToUint
+module.exports.fromUint = uintToFloat
+},{}],23:[function(require,module,exports){
+exports.flatten = function(arr) {
+  var result = new Array(arr.length * 3);
+  for(var i=0,j=0; i<arr.length; ++i, j+=3) {
+    var p = arr[i];
+    for(var k=0; k<3; ++k) {
+      result[j+k] = p[k];
+    }
+  }
+  return result;
+}
+
+function pushVert(result, p) {
+  for(var k=0; k<3; ++k) {
+    result.push(p[k]);
+  }
+}
+
+exports.elementLen = function(faces) {
+  var count = 0;
+  for(var i=0; i<faces.length; ++i) {
+    count += faces[i].length - 2;
+  }
+  return count;
+}
+
+exports.flattenFaces = function(faces, arr) {
+  var result = [];
+  for(var i=0; i<faces.length; ++i) {
+    var f = faces[i];
+    for(var j=2; j<f.length; ++j) {
+      pushVert(result, arr[f[0]]);
+      pushVert(result, arr[f[j-1]]);
+      pushVert(result, arr[f[j]]);
+    }
+  }
+  return result;
+}
+
+exports.flattenPerFace = function(faces, arr) {
+  var result = [];
+  for(var i=0; i<faces.length; ++i) {
+    var f = faces[i];
+    for(var j=2; j<f.length; ++j) {
+      pushVert(result, arr[i]);
+      pushVert(result, arr[i]);
+      pushVert(result, arr[i]);
+    }
+  }
+  return result;
+}
+
+var nextFrame = (function(){
+    return  window.requestAnimationFrame       ||
+            window.webkitRequestAnimationFrame || 
+            window.mozRequestAnimationFrame    || 
+            window.oRequestAnimationFrame      || 
+            window.msRequestAnimationFrame     || 
+            function( callback ){
+              window.setTimeout(callback, 1000 / 60);
+            };
+  })();
+
+exports.nextFrame = function(f) { nextFrame(f); };
+
+exports.printVec3 = function(vec) {
+  return "vec3(" + vec[0] + "," + vec[1] + "," + vec[2] + ")";
+}
+},{}],18:[function(require,module,exports){
+var parse = require('esprima').parse;
+
+module.exports = function (src) {
+    var ast = typeof src === 'string' ? parse(src) : src;
+    return function (cb) {
+        walk(ast, undefined, cb);
+    };
+};
+
+function walk (node, parent, cb) {
+    var keys = objectKeys(node);
+    for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        if (key === 'parent') continue;
+        
+        var child = node[key];
+        if (isArray(child)) {
+            for (var j = 0; j < child.length; j++) {
+                var c = child[j];
+                if (c && typeof c.type === 'string') {
+                    c.parent = node;
+                    walk(c, node, cb);
+                }
+            }
+        }
+        else if (child && typeof child.type === 'string') {
+            child.parent = node;
+            walk(child, node, cb);
+        }
+    }
+    cb(node);
+}
+
+var isArray = Array.isArray || function (xs) {
+    return Object.prototype.toString.call(xs) === '[object Array]';
+};
+
+var objectKeys = Object.keys || function (obj) {
+    var keys = [];
+    for (var key in obj) keys.push(key);
+    return keys;
+};
+
+},{"esprima":24}],25:[function(require,module,exports){
 //Simple arcball camera
 
 var EPSILON = 1e-8;
@@ -17856,128 +17542,7 @@ ArcballCamera.prototype.matrix = function() {
 
 exports.ArcballCamera = ArcballCamera;
 
-},{}],26:[function(require,module,exports){
-var EPSILON = 1e-6;
-
-//Estimate the vertex normals of a mesh
-exports.vertexNormals = function(faces, positions) {
-  
-  var N         = positions.length;
-  var normals   = new Array(N);
-  
-  //Initialize normal array
-  for(var i=0; i<N; ++i) {
-    normals[i] = [0.0, 0.0, 0.0];
-  }
-  
-  //Walk over all the faces and add per-vertex contribution to normal weights
-  for(var i=0; i<faces.length; ++i) {
-    var f = faces[i];
-    var p = 0;
-    var c = f[f.length-1];
-    var n = f[0];
-    for(var j=0; j<f.length; ++j) {
-    
-      //Shift indices back
-      p = c;
-      c = n;
-      n = f[(j+1) % f.length];
-    
-      var v0 = positions[p];
-      var v1 = positions[c];
-      var v2 = positions[n];
-      
-      //Compute infineteismal arcs
-      var d01 = new Array(3);
-      var m01 = 0.0;
-      var d21 = new Array(3);
-      var m21 = 0.0;
-      for(var k=0; k<3; ++k) {
-        d01[k] = v0[k]  - v1[k];
-        m01   += d01[k] * d01[k];
-        d21[k] = v2[k]  - v1[k];
-        m21   += d21[k] * d21[k];
-      }
-
-      //Accumulate values in normal
-      if(m01 * m21 > EPSILON) {
-        var norm = normals[c];
-        var w = 1.0 / Math.sqrt(m01 * m21);
-        for(var k=0; k<3; ++k) {
-          var u = (k+1)%3;
-          var v = (k+2)%3;
-          norm[k] += w * (d21[u] * d01[v] - d21[v] * d01[u]);
-        }
-      }
-    }
-  }
-  
-  //Scale all normals to unit length
-  for(var i=0; i<N; ++i) {
-    var norm = normals[i];
-    var m = 0.0;
-    for(var k=0; k<3; ++k) {
-      m += norm[k] * norm[k];
-    }
-    if(m > EPSILON) {
-      var w = 1.0 / Math.sqrt(m);
-      for(var k=0; k<3; ++k) {
-        norm[k] *= w;
-      }
-    } else {
-      for(var k=0; k<3; ++k) {
-        norm[k] = 0.0;
-      }
-    }
-  }
-
-  //Return the resulting set of patches
-  return normals;
-}
-
-//Compute face normals of a mesh
-exports.faceNormals = function(faces, positions) {
-  var N         = faces.length;
-  var normals   = new Array(N);
-  
-  for(var i=0; i<N; ++i) {
-    var f = faces[i];
-    var pos = new Array(3);
-    for(var j=0; j<3; ++j) {
-      pos[j] = positions[f[j]];
-    }
-    
-    var d01 = new Array(3);
-    var d21 = new Array(3);
-    for(var j=0; j<3; ++j) {
-      d01[j] = pos[1][j] - pos[0][j];
-      d21[j] = pos[2][j] - pos[0][j];
-    }
-    
-    var n = new Array(3);
-    var l = 0.0;
-    for(var j=0; j<3; ++j) {
-      var u = (j+1)%3;
-      var v = (j+2)%3;
-      n[j] = d01[u] * d21[v] - d01[v] * d21[u];
-      l += n[j] * n[j];
-    }
-    if(l > EPSILON) {
-      l = 1.0 / Math.sqrt(l);
-    } else {
-      l = 0.0;
-    }
-    for(var j=0; j<3; ++j) {
-      n[j] *= l;
-    }
-    normals[i] = n;
-  }
-  return normals;
-}
-
-
-
-},{}],23:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 (function(){/*
   Copyright (C) 2012 Ariya Hidayat <ariya.hidayat@gmail.com>
   Copyright (C) 2012 Mathias Bynens <mathias@qiwi.be>
@@ -21875,5 +21440,352 @@ parseStatement: true, parseSourceElement: true */
 /* vim: set sw=4 ts=4 et tw=80 : */
 
 })()
-},{}]},{},[1])
+},{}],16:[function(require,module,exports){
+//Import libraries
+var $             = require('jquery-browserify')
+  , GLOW          = require('./GLOW.js').GLOW
+  , ArcballCamera = require('arcball').ArcballCamera
+  , utils         = require('./utils.js')
+  , EventEmitter  = require('events').EventEmitter;
+
+exports.makeShell = function(params) {
+  if(!params) {
+    params = {};
+  }
+  var shell = {};
+  var bg_color    = params.bg_color   || [ 0.3, 0.5, 0.87 ]
+    , camera_pos  = params.camera_pos || [ 0, 0, 50 ]
+    , container   = params.container  || "#container";
+
+  var citem = $(container)[0]
+
+  //Create event emitter
+  shell.events = new EventEmitter({ width:citem.clientWidth, height:citem.clientHeight });
+
+  //Initialize GLOW
+  shell.context = new GLOW.Context();
+  shell.context.setupClear({
+      red:    bg_color[0]
+    , green:  bg_color[1]
+    , blue:   bg_color[2]
+  });
+  GLOW.defaultCamera.localMatrix.setPosition(
+      camera_pos[0]
+    , camera_pos[1]
+    , camera_pos[2]
+  );
+  GLOW.defaultCamera.update();
+  
+  //Create arcball camera
+  shell.camera = new ArcballCamera();
+  shell.buttons = {
+      rotate: false
+    , pan: false
+    , zoom: false
+  };
+  
+  //Hook up controls
+  var buttons = shell.buttons;
+  shell.container = container;
+  $(container)[0].appendChild( shell.context.domElement );
+  $(container).mousemove(function(e) {
+    var c = $(container);
+    shell.camera.update(e.pageX/c.width()-0.5, e.pageY/c.height()-0.5, {
+      rotate: buttons.rotate || !(e.ctrlKey || e.shiftKey) && (e.which === 1),
+      pan:    buttons.pan    || (e.ctrlKey && e.which !== 0) || (e.which === 2),
+      zoom:   buttons.zoom   || (e.shiftlKey && e.which !== 0) || e.which === 3
+    })
+  });
+  $(document).keydown(function(e) {
+    if(e.keyCode === 65) {
+      buttons.rotate = true;
+    }
+    if(e.keyCode === 83) {
+      buttons.pan = true;
+    }
+    if(e.keyCode === 68) {
+      buttons.zoom = true;
+    }
+  });
+  $(document).keyup(function(e) {
+    if(e.keyCode === 65) {
+      buttons.rotate = false;
+    }
+    if(e.keyCode === 83) {
+      buttons.pan = false;
+    }
+    if(e.keyCode === 68) {
+      buttons.zoom = false;
+    }
+  });
+  $(container).blur(function(e) {
+    buttons.rotate = buttons.pan = buttons.zoom = false;
+  })
+  
+  function updateShape() {
+    var w = citem.clientWidth|0
+    var h = citem.clientHeight|0
+    if(w !== shell.context.domElement.width ||
+       h !== shell.context.domElement.height ) {
+      shell.context.width = w;
+      shell.context.height = h;
+      shell.context.viewport.width = w;
+      shell.context.viewport.height = h;
+      shell.context.domElement.width = w;
+      shell.context.domElement.height = h;
+      GLOW.defaultCamera.aspect = w / h;
+      GLOW.Matrix4.makeProjection(
+        GLOW.defaultCamera.fov,
+        GLOW.defaultCamera.aspect,
+        GLOW.defaultCamera.near,
+        GLOW.defaultCamera.far,
+        GLOW.defaultCamera.projection
+      );
+    }
+    
+  }
+  $(container).bind("DOMSubtreeModified", updateShape)
+  $(window).resize(updateShape)
+  shell.updateShape = updateShape
+  
+  //Render loop
+  function render() {
+    shell.context.cache.clear();
+    shell.context.setViewport();
+    GLOW.defaultCamera.update()
+    shell.context.enableDepthTest(true);
+    if(params.cullCW) {
+      shell.context.enableCulling(true, {frontFace: GL.CW, cullFace: GL.BACK});
+    } else if(params.cullCCW) {
+      shell.context.enableCulling(true, {frontFace: GL.CCW, cullFace: GL.BACK});
+    } else {
+      shell.context.enableCulling(false);
+    }
+    shell.context.clear();
+  
+    shell.events.emit("render");
+    
+    utils.nextFrame(render);
+  }
+  
+  render();
+  
+  return shell;
+}
+
+},{"events":22,"./GLOW.js":15,"./utils.js":23,"arcball":25,"jquery-browserify":8}],17:[function(require,module,exports){
+//Simple mesh viewer
+var $             = require("jquery-browserify")
+  , GLOW          = require("./GLOW.js").GLOW
+  , utils         = require("./utils.js")
+  , normals       = require("normals");
+
+var vertexNormals = normals.vertexNormals;
+var faceNormals = normals.faceNormals;
+
+exports.makeViewer = function(params) {
+
+  if(!params) {
+    params = {};
+  }
+  var shell = require("./shell.js").makeShell(params);
+  
+  shell.params = params;
+  
+  if(!params.lightPosition) {
+    params.lightPosition = [100,100,100];
+  }
+
+  var shaderInfo = {
+    vertexShader: [
+      "uniform     mat4     transform;",
+      "uniform     mat4     cameraInverse;",
+      "uniform     mat4     cameraProjection;",
+      
+      "attribute  vec3      position;",
+      "attribute  vec3      color;",
+      "attribute  vec3      normal;",
+      
+      "varying    vec3      eyeDir;",
+      "varying    vec3      f_color;",
+      "varying    vec3      f_normal;",
+      "varying    vec3      f_position;",
+      
+      "void main(void) {",
+        "vec4 t_position = transform * vec4( position, 1.0 );",
+        "gl_Position = cameraProjection * cameraInverse * t_position;",
+        "eyeDir = normalize(t_position.xyz);",
+        "f_color = color;",
+        "f_normal = normal;",
+        "f_position = position;",
+      "}"
+    ].join("\n"),
+    fragmentShader: [
+      "#ifdef GL_ES",
+        "precision highp float;",
+      "#endif",
+      
+      "uniform    vec3  lightPosition;",
+      "uniform    float     ambientPower;",
+      "uniform    float     diffusePower;",
+      "uniform    float     specularPower;",
+      
+      "varying    vec3      eyeDir;",
+      "varying    vec3      f_color;",
+      "varying    vec3      f_normal;",
+      "varying    vec3      f_position;",
+      
+      "void main() {",
+      
+        "vec3 lightDir = normalize(lightPosition - f_position);",
+
+        "float diffuse = clamp(dot(lightDir, f_normal), 0.0, 1.0);",
+        "float specular = clamp(dot(f_normal, normalize(lightDir + eyeDir)), 0.0, 1.0);",
+        "specular = pow(specular, 32.0);",
+        "float intensity = ambientPower + diffusePower * diffuse + specularPower * specular;",
+        
+        "gl_FragColor = vec4(intensity * f_color, 1.0);",
+      "}"
+    ].join("\n"),
+    data: {
+      transform:        new GLOW.Matrix4(),
+      cameraInverse:    GLOW.defaultCamera.inverse,
+      cameraProjection: GLOW.defaultCamera.projection,
+      position:         new Float32Array([0,0,0,1,0,0,0,1,0]),
+      color:            new Float32Array([0,0,1,1,0,0,0,1,0]),
+      normal:           new Float32Array([0,0,1,0,0,1,0,0,1]),
+      lightPosition:    new GLOW.Vector3(params.lightPosition[0], params.lightPosition[1], params.lightPosition[2]),
+      ambientPower:     new GLOW.Float(0.4),
+      diffusePower:     new GLOW.Float(0.6),
+      specularPower:    new GLOW.Float(0.5)
+    },
+    interleave: {
+      position: false,
+      normal:   false,
+      color:    false
+    },
+    primitives: GL.TRIANGLES,
+    usage:     GL.DYNAMIC_DRAW
+  };
+  
+  
+  var wireInfo = {
+    vertexShader: [
+      "uniform     mat4     transform;",
+      "uniform     mat4     cameraInverse;",
+      "uniform     mat4     cameraProjection;",
+      
+      "attribute  vec3      position;",
+      
+      "void main(void) {",
+        "vec4 t_position = transform * vec4( position, 1.0 );",
+        "gl_Position = cameraProjection * cameraInverse * t_position;",
+      "}"
+    ].join("\n"),
+    fragmentShader: [
+      "#ifdef GL_ES",
+        "precision highp float;",
+      "#endif",
+      
+      "void main() {",
+        "gl_FragColor = vec4(0, 0, 0, 1);",
+      "}"
+    ].join("\n"),
+    data: {
+      transform:        new GLOW.Matrix4(),
+      cameraInverse:    GLOW.defaultCamera.inverse,
+      cameraProjection: GLOW.defaultCamera.projection,
+      position:         new Float32Array([0,0,0,1,0,0]),
+    },
+    interleave: {
+      position: false,
+    },
+    primitives: GL.LINES,
+    usage:     GL.DYNAMIC_DRAW
+  };
+  
+  shell.shader = new GLOW.Shader(shaderInfo);
+  shell.wireShader = new GLOW.Shader(wireInfo);
+  
+  //Update mesh
+  shell.updateMesh = function(params) {
+
+    if(params.packed) {
+      shell.shader.normal.bufferData(params.normals)
+      shell.shader.color.bufferData(params.colors)
+      shell.shader.position.bufferData(params.positions)
+      shell.shader.elements.length = (params.positions.length / 3)|0
+      return
+    }
+    
+    var faces = params.faces || params.cells
+    
+    //Update normals
+    if(shell.params.flatShaded) {
+      var normals = params.faceNormals || faceNormals(faces, params.positions);
+      shell.shader.normal.bufferData(new Float32Array(utils.flattenPerFace(faces, normals)));
+    } else {
+      var normals = params.vertexNormals || vertexNormals(faces, params.positions);
+      shell.shader.normal.bufferData(new Float32Array(utils.flattenFaces(faces, normals)));
+    }
+    
+    //Update colors
+    if(params.colors) {
+      shell.shader.color.bufferData(new Float32Array(utils.flattenFaces(faces, params.colors)));
+    } else if(params.faceColors) {
+      shell.shader.color.bufferData(new Float32Array(utils.flattenPerFace(faces, params.faceColors)));
+    } else {
+      for(var i=0; i<normals.length; ++i) {
+        for(var j=0; j<3; ++j) {
+          normals[i][j] = 0.5 * normals[i][j] + 0.5;
+        }
+      }
+      if(shell.params.flatShaded) {
+        shell.shader.color.bufferData(new Float32Array(utils.flattenPerFace(faces, normals)));
+      } else {
+        shell.shader.color.bufferData(new Float32Array(utils.flattenFaces(faces, normals)));
+      }
+    }
+    
+    //Update buffer data
+    shell.shader.position.bufferData(new Float32Array(utils.flattenFaces(faces, params.positions)), GL.DYNAMIC_DRAW);
+    
+    shell.shader.elements.length = 3*utils.elementLen(faces);
+    
+    if(shell.params.wireframe) {
+      var wire_pos = [];
+      for(var i=0; i<faces.length; ++i) {
+        var f = faces[i];
+        for(var j=0; j<f.length; ++j) {
+          wire_pos.push(params.positions[f[j]]);
+          wire_pos.push(params.positions[f[(j+1)%f.length]]);
+        }
+      }
+      shell.wireShader.position.bufferData(new Float32Array(utils.flatten(wire_pos)));
+      shell.wireShader.elements.length = wire_pos.length;
+    }
+  }
+
+  //Draw mesh
+  shell.events.on('render', function() {
+    var matrix = shell.camera.matrix()
+      , xform0  = shell.shader.transform
+      , xform1  = shell.wireShader.transform;
+    for(var i=0; i<4; ++i) {
+      for(var j=0; j<4; ++j) {
+        var ptr = i+4*j;
+        xform0.value[ptr] = xform1.value[ptr] = matrix[i][j];
+      }
+    }
+    shell.shader.draw();
+    if(shell.params.wireframe) {
+      GL.lineWidth(2.0);
+      shell.wireShader.draw();
+    }
+  });
+
+  return shell;
+}
+
+},{"./GLOW.js":15,"./utils.js":23,"./shell.js":16,"jquery-browserify":8,"normals":11}]},{},[1])
 ;
